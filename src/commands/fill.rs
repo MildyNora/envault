@@ -32,7 +32,7 @@ pub fn cmd_fill(alias: String, selector: Option<String>, cdp_base: String) -> Re
         }
     }
 
-    let identity = crypto::load_identity()?;
+    let identity = crate::access::unlock(&home, "fill", &alias)?;
     let value = crypto::decrypt_value(&identity, &entry.cipher)?;
     let ws_url = target.ws_url.clone().expect("picked target has ws url");
     let place = cdp::fill_via_cdp(&ws_url, selector.as_deref(), &value)?;

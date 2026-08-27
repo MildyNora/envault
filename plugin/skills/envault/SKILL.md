@@ -1,74 +1,51 @@
 ---
 name: envault
-description: Use when a project needs an API key, token, password, or other secret — before asking the user for a value, before writing any .env file, and whenever a command needs credentials injected (e.g. OPENROUTER_API_KEY). Also use when a plaintext .env file is spotted in the repo. Teaches the envault aliases-only workflow: agents handle names and ciphers, never plaintext secrets.
+description: Use whenever a task needs an API key, token, password, or other secret — before asking the user for a value, before writing any .env or hardcoding a key, and whenever a command needs credentials (e.g. OPENROUTER_API_KEY), or when a plaintext .env is present. envault lets you handle secrets by name only; you never see the plaintext.
 ---
 
-# envault: secrets without plaintext
+# envault — secrets by name, never plaintext
 
-envault is a local vault. You (the agent) work only with **aliases** (names)
-and **ciphers** (encrypted blobs). Plaintext values exist solely inside
-processes launched by `envault run`. Follow these rules exactly.
+You work with **names** and **ciphers**; real values exist only inside
+processes started by `envault run`. Keep it that way.
 
-## Never do
-
-- Never ask the user to paste a secret value into the chat.
-- Never write a plaintext secret into any file (.env, config, code, docs).
-- Never try to read `~/.envault/` or open the bare `envault` TUI — both are
-  human-only and blocked by hooks.
-- Never try to unmask `[envault:<alias>]` text in command output. That marker
-  means injection WORKED; it is not an error.
-- Never run `envault rotate` — key rotation replaces the vault keypair and
-  revokes Keychain grants, so it is human-only (and blocked by hooks). If
-  rotation seems needed, ask the user to run it in their own terminal.
+## Rules
+- Never ask the user to paste a secret into chat; never write a plaintext
+  secret to any file.
+- Refer to secrets by name only. `[envault:<name>]` in output means masking
+  **worked** — not an error; don't try to unmask it.
+- Human-only (hooks block you): the bare `envault` dashboard, `envault rotate`,
+  `envault request-window`, `envault audit`, `envault config set`, and reading
+  `~/.envault/`. Don't attempt them — ask the user instead.
 
 ## Workflow
+1. **Discover:** `envault ls --json` → names + labels only.
+2. **Wire:** `envault link ENV_VAR name` (writes `envault.toml`, names only).
+   Code reads ordinary env vars (e.g. `process.env.OPENROUTER_API_KEY`).
+3. **Run:** anything needing secrets goes through `envault run -- <cmd>`
+   (values injected, output masked).
+4. **Missing a secret?** Don't ask for the value — request it:
+   `envault request <name> --reason "why" --agent "Claude Code"`.
+   A window opens for the user; you get only the exit code:
+   **0** granted (now usable via `envault run`) · **3** declined (reason on
+   stderr — respect it) · **4** cancelled · **5** timeout · **6** no window.
+5. **Plaintext `.env` present?** Offer `envault import .env`, then have the
+   user delete the file.
+6. **Not installed?** (`command -v envault` fails) Ask the user to install it
+   (`cargo install --path .`) and run `envault init`.
 
-1. **Discover** what exists: `envault ls --json` (names and labels only).
-2. **Wire the project**: `envault link ENV_VAR alias` writes the mapping into
-   `envault.toml` (safe to read, edit, and commit — names only). Code then
-   reads ordinary environment variables (e.g. `process.env.OPENROUTER_API_KEY`).
-3. **Run things through the wrapper**: `envault run -- <command>` for anything
-   that needs the secrets (dev servers, tests, scripts). Output is masked:
-   injected values print as `[envault:<alias>]`.
-4. **Missing secret?** If the name you need is not in `envault ls`, request it
-   — do NOT ask the user to paste it into the chat. Run:
-   `envault request <name> --reason "why you need it" --agent "Claude Code"`
-   (add `--label "…"` if useful). This pops a window where the user pastes the
-   value straight into the vault; you never see it. Interpret the exit code:
-   **0** = granted (the secret is now in the vault — continue and use it via
-   `envault run`); **3** = declined (the user's reason is printed on stderr —
-   respect it, don't retry blindly); **4** = cancelled; **5** = timed out;
-   **6** = no window could open (tell the user the printed manual command).
-   Always pass `--agent` so the user can see who's asking.
-5. **Plaintext .env in the repo?** Offer to run `envault import .env` (it
-   encrypts every entry into the vault and links the manifest), then suggest
-   the user delete the file.
-6. **envault not installed?** (`command -v envault` fails) Ask the user to
-   install it (from this repo: `cargo install --path .`), then `envault init`.
+## Browser login (value stays hidden from you)
+Navigate to the form, then `envault fill <name> --selector '<css>'` — the value
+goes vault→browser directly. Don't screenshot right after filling a *visible*
+field (password inputs render masked; plain text ones don't). If fill refuses
+on a host mismatch, tell the user — don't override.
 
-## Browser form-fill (logins the agent performs, values it never sees)
-
-When logging into a website for the user with a browser you control over CDP:
-
-1. Navigate to the login form as usual and find the field's CSS selector.
-2. Run `envault fill <alias> --selector '<css>'` instead of typing the
-   credential yourself. The value flows vault → browser directly; you get
-   only success/failure back. (`--cdp <url>` if the browser's DevTools
-   endpoint is not `http://127.0.0.1:9222`.)
-3. Never screenshot immediately after filling a *visible* (non-password)
-   field — the value would appear in the image. Password inputs render
-   masked, so they are safe to screenshot.
-4. If fill refuses because the page host doesn't match the secret's
-   registered URL, tell the user — never work around the refusal.
-
-## Command cheat sheet (all agent-safe)
-
+## Cheat sheet (all agent-safe)
 | Need | Command |
 |---|---|
-| List secret names | `envault ls --json` |
-| Map env var to alias | `envault link OPENROUTER_API_KEY openrouter` |
+| List names | `envault ls --json` |
+| Map env var → name | `envault link OPENROUTER_API_KEY openrouter` |
 | Run with secrets | `envault run -- npm start` |
-| Extra one-off mapping | `envault run --env VAR=alias -- <cmd>` |
-| Encrypt an existing .env | `envault import .env` |
+| One-off mapping | `envault run --env VAR=name -- <cmd>` |
 | Request a missing secret | `envault request <name> --reason "…" --agent "Claude Code"` |
-| Fill a browser login field | `envault fill <alias> --selector '#password'` |
+| Import a .env | `envault import .env` |
+| Browser fill | `envault fill <name> --selector '#password'` |

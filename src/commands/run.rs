@@ -83,10 +83,10 @@ pub fn cmd_run(args: RunArgs) -> Result<i32> {
         bail!("aliases missing from the vault:\n{list}\nadd them with `envault add <alias>`");
     }
 
-    // 3. Decrypt.
+    // 3. Decrypt (gated + audited via the access choke point).
     let mut injected: Vec<(String, String, String)> = Vec::new(); // (var, alias, value)
     if mappings.iter().any(|(_, a)| vault.get(a).is_some()) {
-        let identity = crypto::load_identity()?;
+        let identity = crate::access::unlock(&home, "run", &args.command.join(" "))?;
         for (var, alias) in &mappings {
             if let Some(entry) = vault.get(alias) {
                 let value = crypto::decrypt_value(&identity, &entry.cipher)?;

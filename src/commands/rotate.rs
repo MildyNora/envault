@@ -15,7 +15,7 @@ pub struct RotateOutcome {
 /// and the TUI's `:rotate`.
 pub fn rotate_in_place(home: &Path) -> Result<RotateOutcome> {
     let mut vault = Vault::load(home)?;
-    let old_identity = crypto::load_identity()?;
+    let old_identity = crate::access::unlock(home, "rotate", "re-key vault")?;
 
     // Decrypt everything up front: any failure aborts before any state changes.
     let mut values: Vec<String> = Vec::with_capacity(vault.secrets.len());
