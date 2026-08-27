@@ -39,6 +39,8 @@ window on Windows, and a terminal emulator on Linux.
 - `envault config set touch-id on` — require a Touch ID / Windows Hello /
   password prompt before every decryption. Opt-in; off by default for
   smoothness. (macOS/Windows; not available on Linux yet.)
+- Both toggles are also in the dashboard's `:` command palette (`:audit`,
+  `:touchid`), and the current on/off state shows in `?` help.
 
 ## Agent integration (Claude Code plugin)
 

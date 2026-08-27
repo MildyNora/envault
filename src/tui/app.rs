@@ -21,10 +21,12 @@ pub const FIELD_HELP: [&str; 5] = [
 ];
 
 /// Typable `:` commands: (name, description). Also drives the palette list.
-pub const COMMANDS: [(&str, &str); 3] = [
+pub const COMMANDS: [(&str, &str); 5] = [
     ("rotate", "re-key the vault · revokes Keychain grants"),
     ("help", "keys, commands & the security boundary"),
     ("quit", "exit the dashboard"),
+    ("audit", "turn the audit log on/off"),
+    ("touchid", "turn the Touch ID gate on/off"),
 ];
 
 /// Indices into COMMANDS whose name starts with `input` (empty input = all).
@@ -71,6 +73,8 @@ pub enum Effect {
     Decrypt { alias: String },
     Copy { alias: String },
     Rotate,
+    ToggleAudit,
+    ToggleTouchId,
     Quit,
 }
 
@@ -89,6 +93,8 @@ pub struct App {
     pub mode: Mode,
     pub status: String,
     pub status_kind: StatusKind,
+    /// Cached settings for display; the runtime keeps this in sync with disk.
+    pub settings: crate::settings::Settings,
 }
 
 impl App {
@@ -101,6 +107,7 @@ impl App {
             mode: Mode::List,
             status: String::new(),
             status_kind: StatusKind::Info,
+            settings: crate::settings::Settings::default(),
         }
     }
 
@@ -387,11 +394,11 @@ impl App {
             "" => {}
             "rotate" => self.mode = Mode::ConfirmRotate,
             "help" | "?" => self.mode = Mode::Help,
+            "audit" => return Some(Effect::ToggleAudit),
+            "touchid" | "touch-id" => return Some(Effect::ToggleTouchId),
             "q" | "quit" | "exit" => return Some(Effect::Quit),
             other => {
-                self.set_error(format!(
-                    "unknown command: {other} (try rotate · help · quit)"
-                ));
+                self.set_error(format!("unknown command: {other}"));
             }
         }
         None
@@ -777,6 +784,23 @@ mod tests {
         app.handle_key(key(KeyCode::Down)); // sel 1 = help
         assert!(app.handle_key(key(KeyCode::Enter)).is_none());
         assert!(matches!(app.mode, Mode::Help));
+    }
+
+    #[test]
+    fn command_palette_toggles_settings() {
+        let (mut app, _) = app_with(&[]);
+        app.handle_key(ch(':'));
+        type_str(&mut app, "audit");
+        assert!(matches!(
+            app.handle_key(key(KeyCode::Enter)),
+            Some(Effect::ToggleAudit)
+        ));
+        app.handle_key(ch(':'));
+        type_str(&mut app, "touchid");
+        assert!(matches!(
+            app.handle_key(key(KeyCode::Enter)),
+            Some(Effect::ToggleTouchId)
+        ));
     }
 
     #[test]

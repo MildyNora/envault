@@ -47,7 +47,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
 
     // Overlays paint on top.
     match &app.mode {
-        Mode::Help => draw_help_overlay(frame, area),
+        Mode::Help => draw_help_overlay(frame, area, app),
         Mode::Command(cl) => draw_command_palette(frame, outer[3], &cl.input, cl.sel),
         Mode::ConfirmDelete => draw_confirm_popup(
             frame,
@@ -515,8 +515,8 @@ fn draw_confirm_popup(frame: &mut Frame, area: Rect, title: &str, body: &str) {
     );
 }
 
-fn draw_help_overlay(frame: &mut Frame, area: Rect) {
-    let popup = centered_rect(area, 66, 24);
+fn draw_help_overlay(frame: &mut Frame, area: Rect, app: &App) {
+    let popup = centered_rect(area, 66, 26);
     frame.render_widget(Clear, popup);
     let key = |k: &str, d: &str| {
         Line::from(vec![
@@ -543,8 +543,15 @@ fn draw_help_overlay(frame: &mut Frame, area: Rect) {
         Line::from(""),
         head("Commands  (: opens a searchable palette)"),
         key(":rotate", "re-key the vault (revokes Keychain grants)"),
-        key(":help", "this screen"),
-        key(":quit", "exit"),
+        key(
+            ":audit",
+            &format!("audit log — now {}", on_off(app.settings.audit_log)),
+        ),
+        key(
+            ":touchid",
+            &format!("Touch ID gate — now {}", on_off(app.settings.touch_id)),
+        ),
+        key(":help / :quit", "this screen · exit"),
         Line::from(""),
         head("What agents can see"),
         Line::styled(
@@ -583,6 +590,14 @@ fn draw_help_overlay(frame: &mut Frame, area: Rect) {
         ),
         popup,
     );
+}
+
+fn on_off(b: bool) -> &'static str {
+    if b {
+        "ON"
+    } else {
+        "off"
+    }
 }
 
 fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {

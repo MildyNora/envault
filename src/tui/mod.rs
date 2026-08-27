@@ -53,6 +53,7 @@ fn vault_mtime(home: &std::path::Path) -> Option<std::time::SystemTime> {
 fn event_loop(app: &mut App, home: &std::path::Path) -> Result<()> {
     let mut terminal = Terminal::new(CrosstermBackend::new(std::io::stdout()))?;
     let mut last_mtime = vault_mtime(home);
+    app.settings = crate::settings::Settings::load(home);
 
     // Read input on a dedicated thread and deliver it over a channel. This lets
     // the main loop wake on a real timer (recv_timeout) to watch the vault file,
@@ -121,10 +122,30 @@ fn event_loop(app: &mut App, home: &std::path::Path) -> Result<()> {
                 },
                 Err(e) => app.set_error(format!("rotate failed: {e:#}")),
             },
+            Some(Effect::ToggleAudit) => {
+                app.settings.audit_log = !app.settings.audit_log;
+                persist_settings(app, home, "audit log");
+            }
+            Some(Effect::ToggleTouchId) => {
+                app.settings.touch_id = !app.settings.touch_id;
+                persist_settings(app, home, "Touch ID gate");
+            }
         }
         // Our own writes (save/rotate) just changed the file; adopt the new
         // mtime so the watcher above doesn't treat them as an external change.
         last_mtime = vault_mtime(home);
+    }
+}
+
+fn persist_settings(app: &mut App, home: &std::path::Path, label: &str) {
+    let state = if label.contains("audit") {
+        app.settings.audit_log
+    } else {
+        app.settings.touch_id
+    };
+    match app.settings.save(home) {
+        Ok(()) => app.set_success(format!("{label} {}", if state { "on" } else { "off" })),
+        Err(e) => app.set_error(format!("couldn't save settings: {e:#}")),
     }
 }
 
