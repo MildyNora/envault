@@ -35,12 +35,11 @@ fn identity_file_override() -> Option<std::path::PathBuf> {
 pub fn store_identity(identity: &age::x25519::Identity, _home: &Path) -> Result<()> {
     let key = identity.to_string(); // SecretString
     if let Some(path) = identity_file_override() {
-        use std::os::unix::fs::PermissionsExt;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
         fs::write(&path, format!("{}\n", key.expose_secret()))?;
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+        crate::platform::set_mode(&path, 0o600)?;
         return Ok(());
     }
     let entry = keyring::Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT)
@@ -146,9 +145,12 @@ mod tests {
         let cipher = encrypt_value(&load_recipient(dir.path()).unwrap(), "roundtrip").unwrap();
         assert_eq!(decrypt_value(&loaded, &cipher).unwrap(), "roundtrip");
 
-        use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(&id_path).unwrap().permissions().mode();
-        assert_eq!(mode & 0o777, 0o600);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&id_path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
     }
 
     #[test]

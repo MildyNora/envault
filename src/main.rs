@@ -6,6 +6,7 @@ mod crypto;
 mod manifest;
 mod masker;
 mod paths;
+mod platform;
 mod store;
 mod tui;
 

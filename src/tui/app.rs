@@ -148,6 +148,14 @@ impl App {
         self.mode = Mode::Reveal(value);
     }
 
+    /// Swap in a vault reloaded from disk (e.g. after an external change like a
+    /// granted request), keeping the selection in range. The recipient is
+    /// unchanged — external writers encrypt to the same public key.
+    pub fn reload_vault(&mut self, vault: Vault) {
+        self.vault = vault;
+        self.clamp_selection();
+    }
+
     /// Runtime callback after a successful `Effect::Rotate`.
     pub fn after_rotate(&mut self, count: usize, vault: Vault, recipient: age::x25519::Recipient) {
         self.vault = vault;
@@ -570,6 +578,18 @@ mod tests {
         let visible: Vec<_> = app.visible().iter().map(|e| e.alias.clone()).collect();
         assert_eq!(visible, vec!["openrouter"]);
         assert_eq!(app.selected_alias().as_deref(), Some("openrouter"));
+    }
+
+    #[test]
+    fn reload_vault_swaps_and_clamps_selection() {
+        let (mut app, id) = app_with(&["a-key", "b-key", "c-key"]);
+        app.selected = 3; // on the add row
+        let mut v = Vault::default();
+        v.insert(entry("only", &id.to_public())).unwrap();
+        app.reload_vault(v);
+        assert_eq!(app.vault.secrets.len(), 1);
+        assert_eq!(app.selected, 1, "selection clamped to the new add row");
+        assert_eq!(app.selected_alias(), None); // add row
     }
 
     #[test]
