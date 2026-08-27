@@ -264,6 +264,32 @@ fn import_dotenv_encrypts_links_and_reports() {
 }
 
 #[test]
+fn guard_check_blocks_vault_reads_and_allows_normal() {
+    let te = TestEnv::new();
+    te.envault()
+        .arg("guard-check")
+        .write_stdin(format!(
+            "{{\"tool_name\":\"Read\",\"tool_input\":{{\"file_path\":\"{}/vault.json\"}}}}",
+            te.home.path().display()
+        ))
+        .assert()
+        .code(2)
+        .stderr(predicates::str::contains("off-limits"));
+
+    te.envault()
+        .arg("guard-check")
+        .write_stdin("{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"envault ls --json\"}}")
+        .assert()
+        .code(0);
+
+    te.envault()
+        .arg("guard-check")
+        .write_stdin("not json at all")
+        .assert()
+        .code(0); // fail open
+}
+
+#[test]
 fn init_twice_fails() {
     let te = TestEnv::new();
     te.init();

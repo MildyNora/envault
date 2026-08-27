@@ -42,6 +42,9 @@ enum Cmd {
     },
     /// Map a project env var to a vault alias in envault.toml
     Link { env_var: String, alias: String },
+    /// Internal: PreToolUse hook helper (reads hook JSON on stdin)
+    #[command(hide = true)]
+    GuardCheck,
     /// Encrypt every entry of a dotenv file into the vault and link it
     Import { file: std::path::PathBuf },
     /// Run a command with secrets injected and masked out of its output
@@ -78,6 +81,10 @@ fn main() {
         }) => commands::add::cmd_add(alias, label, url, notes, stdin),
         Some(Cmd::Ls { json }) => commands::ls::cmd_ls(json),
         Some(Cmd::Link { env_var, alias }) => commands::link::cmd_link(env_var, alias),
+        Some(Cmd::GuardCheck) => match commands::guard::cmd_guard_check() {
+            Ok(code) => std::process::exit(code),
+            Err(e) => Err(e),
+        },
         Some(Cmd::Import { file }) => commands::import::cmd_import(file),
         Some(Cmd::Run {
             manifest,
