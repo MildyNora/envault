@@ -34,15 +34,23 @@ pub fn guard_decision(
 
     if tool_name == "Bash" {
         if let Some(cmd) = tool_input.get("command").and_then(|c| c.as_str()) {
-            let bare_tui = cmd
-                .split([';', '&', '|', '\n'])
-                .any(|seg| seg.trim() == "envault");
-            if bare_tui {
-                return Some(
-                    "envault guard: the envault TUI dashboard is human-only. \
-                     Ask the user to run `envault` in their own terminal instead."
-                        .to_string(),
-                );
+            for seg in cmd.split([';', '&', '|', '\n']) {
+                let seg = seg.trim();
+                if seg == "envault" {
+                    return Some(
+                        "envault guard: the envault TUI dashboard is human-only. \
+                         Ask the user to run `envault` in their own terminal instead."
+                            .to_string(),
+                    );
+                }
+                if seg == "envault rotate" || seg.starts_with("envault rotate ") {
+                    return Some(
+                        "envault guard: key rotation is human-only (it replaces the \
+                         vault keypair and revokes Keychain grants). Ask the user to \
+                         run `envault rotate` in their own terminal."
+                            .to_string(),
+                    );
+                }
             }
         }
     }
@@ -103,6 +111,20 @@ mod tests {
         assert!(guard_decision("Bash", &bare, HOME).is_some());
         let chained = json!({"command": "cd /tmp && envault"});
         assert!(guard_decision("Bash", &chained, HOME).is_some());
+    }
+
+    #[test]
+    fn blocks_rotate_as_human_only() {
+        for cmd in [
+            "envault rotate",
+            "cd /tmp && envault rotate",
+            "envault rotate --anything",
+        ] {
+            let input = json!({"command": cmd});
+            let verdict = guard_decision("Bash", &input, HOME);
+            assert!(verdict.is_some(), "{cmd} should block");
+            assert!(verdict.unwrap().contains("human-only"), "{cmd}");
+        }
     }
 
     #[test]
