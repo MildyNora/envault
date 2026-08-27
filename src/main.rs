@@ -1,5 +1,8 @@
 use clap::Parser;
 
+mod paths;
+mod store;
+
 #[derive(Parser)]
 #[command(name = "envault", version, about = "Local secrets vault: agents see aliases and ciphers, never plaintext")]
 struct Cli {}
