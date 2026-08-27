@@ -168,29 +168,38 @@ pub fn draw(frame: &mut Frame, app: &RequestApp) {
 
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), rows[0]);
 
-    // footer hint
-    let hint = if app.declining() {
-        Line::from(vec![
-            keycap("Enter"),
-            Span::styled(" send note   ", Style::default().fg(DIM)),
-            keycap("Esc"),
-            Span::styled(" back to value", Style::default().fg(DIM)),
-        ])
-    } else {
-        Line::from(vec![
-            keycap("Enter"),
-            Span::styled(" grant   ", Style::default().fg(DIM)),
-            keycap("n"),
-            Span::styled(" decline   ", Style::default().fg(DIM)),
-            keycap("Esc"),
-            Span::styled(" cancel", Style::default().fg(DIM)),
-            Span::styled(
-                "      the agent never sees the value",
+    // Two-line footer: key hints, then the reassurance on its own line so it
+    // is never clipped by the window edge.
+    let footer = if app.declining() {
+        vec![
+            Line::from(vec![
+                keycap("Enter"),
+                Span::styled(" send note & close   ", Style::default().fg(DIM)),
+                keycap("Esc"),
+                Span::styled(" back to value", Style::default().fg(DIM)),
+            ]),
+            Line::styled(
+                "  the agent sees only your note — never a value.",
                 Style::default().fg(OK),
             ),
-        ])
+        ]
+    } else {
+        vec![
+            Line::from(vec![
+                keycap("Enter"),
+                Span::styled(" grant & close   ", Style::default().fg(DIM)),
+                keycap("n"),
+                Span::styled(" decline   ", Style::default().fg(DIM)),
+                keycap("Esc"),
+                Span::styled(" cancel", Style::default().fg(DIM)),
+            ]),
+            Line::styled(
+                "  the agent never sees the value you paste.",
+                Style::default().fg(OK),
+            ),
+        ]
     };
-    frame.render_widget(Paragraph::new(hint), rows[1]);
+    frame.render_widget(Paragraph::new(footer), rows[1]);
 }
 
 fn keycap(k: &str) -> Span<'static> {

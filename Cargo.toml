@@ -1,6 +1,6 @@
 [package]
 name = "envault"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 description = "Local secrets vault for agentic coding: agents see aliases and ciphers, never plaintext"
 license = "MIT"

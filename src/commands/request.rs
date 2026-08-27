@@ -126,10 +126,15 @@ pub fn cmd_request_window(session: PathBuf) -> Result<()> {
     let home = paths::envault_home();
     finish(&home, &meta, outcome, Some(&session))?;
 
-    // Best-effort auto-close of exactly this Terminal window (matched by tty).
+    // Schedule the window to close a beat AFTER this process exits. Closing it
+    // while we're still running makes Terminal pop a "terminate the running
+    // process?" dialog; closing once only the idle login shell remains does
+    // not (with the default profile). The closer is detached into its own
+    // process group so it doesn't keep the window busy either.
     if let Some(tty) = own_tty {
-        close_terminal_window(&tty);
+        schedule_close(&tty);
     }
+    println!("\n  ✔ done — this window will close itself.");
     Ok(())
 }
 
@@ -312,17 +317,26 @@ fn current_tty() -> Option<String> {
     }
 }
 
-fn close_terminal_window(tty: &str) {
+/// Detach a helper that waits briefly, then closes exactly this Terminal
+/// window (matched by tty). By the time it fires, this process has exited and
+/// the window holds only the idle login shell, so Terminal closes it without a
+/// confirmation dialog. `saving no` also suppresses any save prompt.
+fn schedule_close(tty: &str) {
+    use std::os::unix::process::CommandExt;
     let script = format!(
-        "tell application \"Terminal\" to close (every window whose tty is \"{}\")",
+        "delay 0.4\ntell application \"Terminal\" to close (every window whose tty is \"{}\") saving no",
         applescript_escape(tty),
     );
-    let _ = std::process::Command::new("osascript")
-        .arg("-e")
+    let mut cmd = std::process::Command::new("osascript");
+    cmd.arg("-e")
         .arg(&script)
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
+        .stderr(std::process::Stdio::null());
+    // New process group: the closer must not count as a process running in the
+    // window, or its very presence would re-trigger the confirmation.
+    cmd.process_group(0);
+    let _ = cmd.spawn();
 }
 
 /// A short, human-meaningful description of the process that launched us, for

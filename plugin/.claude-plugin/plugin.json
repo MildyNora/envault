@@ -1,6 +1,6 @@
 {
   "name": "envault",
   "description": "Secrets vault workflow for agents: aliases and ciphers only, never plaintext. Pairs with the envault CLI.",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "author": { "name": "purifido" }
 }
