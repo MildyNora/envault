@@ -299,6 +299,119 @@ fn bare_envault_without_tty_refuses_with_hint() {
         .stderr(predicates::str::contains("terminal"));
 }
 
+mod mock_cdp {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::{Arc, Mutex};
+
+    /// Minimal CDP double: one HTTP listener answering /json/list, one
+    /// websocket listener recording every message and answering
+    /// {"result":{"result":{"value":"OK"}}}. Returns (http_base, received_messages).
+    pub fn start(page_url: &str) -> (String, Arc<Mutex<Vec<String>>>) {
+        let ws_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let ws_port = ws_listener.local_addr().unwrap().port();
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let received_ws = received.clone();
+        std::thread::spawn(move || {
+            for stream in ws_listener.incoming().flatten() {
+                let mut ws = match tungstenite::accept(stream) {
+                    Ok(ws) => ws,
+                    Err(_) => continue,
+                };
+                while let Ok(msg) = ws.read() {
+                    if let tungstenite::Message::Text(t) = msg {
+                        let id = serde_json::from_str::<serde_json::Value>(&t)
+                            .ok()
+                            .and_then(|v| v.get("id").and_then(|i| i.as_u64()))
+                            .unwrap_or(0);
+                        received_ws.lock().unwrap().push(t.to_string());
+                        let reply = format!(
+                            "{{\"id\":{id},\"result\":{{\"result\":{{\"value\":\"OK\"}}}}}}"
+                        );
+                        if ws.send(tungstenite::Message::Text(reply)).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+
+        let http_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let http_port = http_listener.local_addr().unwrap().port();
+        let body = format!(
+            "[{{\"type\":\"page\",\"url\":\"{page_url}\",\"webSocketDebuggerUrl\":\"ws://127.0.0.1:{ws_port}/devtools/page/1\"}}]"
+        );
+        std::thread::spawn(move || {
+            for mut stream in http_listener.incoming().flatten() {
+                let mut buf = [0u8; 2048];
+                let _ = stream.read(&mut buf);
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(resp.as_bytes());
+            }
+        });
+        (format!("http://127.0.0.1:{http_port}"), received)
+    }
+}
+
+#[test]
+fn fill_types_secret_into_browser_without_printing_it() {
+    let te = TestEnv::new();
+    te.init();
+    te.envault()
+        .args(["add", "site-login", "--url", "https://example.com", "--stdin"])
+        .write_stdin("hunter2-secret-99\n")
+        .assert()
+        .success();
+
+    let (base, received) = mock_cdp::start("https://example.com/login");
+    let out = te
+        .envault()
+        .args(["fill", "site-login", "--selector", "#pw", "--cdp", &base])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(stdout.contains("site-login"), "{stdout}");
+    assert!(!stdout.contains("hunter2-secret-99"), "value must never print");
+
+    let msgs = received.lock().unwrap();
+    assert!(msgs
+        .iter()
+        .any(|m| m.contains("Runtime.evaluate") && m.contains("#pw")));
+    let insert = msgs
+        .iter()
+        .find(|m| m.contains("Input.insertText"))
+        .expect("insertText sent");
+    assert!(
+        insert.contains("hunter2-secret-99"),
+        "value goes to the browser only"
+    );
+}
+
+#[test]
+fn fill_refuses_on_host_mismatch() {
+    let te = TestEnv::new();
+    te.init();
+    te.envault()
+        .args(["add", "site-login", "--url", "https://example.com", "--stdin"])
+        .write_stdin("hunter2-secret-99\n")
+        .assert()
+        .success();
+    let (base, received) = mock_cdp::start("https://evil.test/login");
+    te.envault()
+        .args(["fill", "site-login", "--cdp", &base])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("refusing"));
+    assert!(
+        received.lock().unwrap().is_empty(),
+        "nothing may reach the browser"
+    );
+}
+
 #[test]
 fn init_twice_fails() {
     let te = TestEnv::new();

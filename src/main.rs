@@ -44,6 +44,16 @@ enum Cmd {
     },
     /// Map a project env var to a vault alias in envault.toml
     Link { env_var: String, alias: String },
+    /// Type a secret into the browser page over CDP (value never shown)
+    Fill {
+        alias: String,
+        /// CSS selector to focus first; omit to use the focused element
+        #[arg(long)]
+        selector: Option<String>,
+        /// DevTools endpoint of the browser
+        #[arg(long, default_value = "http://127.0.0.1:9222")]
+        cdp: String,
+    },
     /// Internal: PreToolUse hook helper (reads hook JSON on stdin)
     #[command(hide = true)]
     GuardCheck,
@@ -78,6 +88,7 @@ fn main() {
         }) => commands::add::cmd_add(alias, label, url, notes, stdin),
         Some(Cmd::Ls { json }) => commands::ls::cmd_ls(json),
         Some(Cmd::Link { env_var, alias }) => commands::link::cmd_link(env_var, alias),
+        Some(Cmd::Fill { alias, selector, cdp }) => commands::fill::cmd_fill(alias, selector, cdp),
         Some(Cmd::GuardCheck) => match commands::guard::cmd_guard_check() {
             Ok(code) => std::process::exit(code),
             Err(e) => Err(e),

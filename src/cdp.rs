@@ -23,9 +23,12 @@ pub fn list_targets(base: &str) -> Result<Vec<Target>> {
 }
 
 pub fn pick_page_target(targets: &[Target]) -> Option<&Target> {
-    targets
-        .iter()
-        .find(|t| t.kind == "page" && t.ws_url.is_some() && !t.url.starts_with("devtools://"))
+    const INTERNAL: [&str; 3] = ["devtools://", "chrome://", "chrome-extension://"];
+    targets.iter().find(|t| {
+        t.kind == "page"
+            && t.ws_url.is_some()
+            && !INTERNAL.iter().any(|prefix| t.url.starts_with(prefix))
+    })
 }
 
 fn host_of(u: &str) -> Option<String> {
@@ -119,6 +122,8 @@ mod tests {
         let targets = vec![
             t("background_page", "chrome-extension://x", Some("ws://a")),
             t("page", "devtools://devtools/inspector.html", Some("ws://b")),
+            t("page", "chrome://omnibox-popup.top-chrome/", Some("ws://omni")),
+            t("page", "chrome-extension://abc/bg.html", Some("ws://ext")),
             t("page", "https://example.com/login", None),
             t("page", "https://example.com/login", Some("ws://c")),
         ];
