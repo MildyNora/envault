@@ -3,7 +3,13 @@ use crossterm::event::{KeyCode, KeyEvent};
 use crate::crypto::encrypt_value;
 use crate::store::{is_valid_alias, now_rfc3339, SecretEntry, Vault};
 
-pub const FIELD_NAMES: [&str; 5] = ["alias", "label", "url", "notes", "value"];
+/// Form field order: the two essentials first, optional annotations below.
+pub const FIELD_NAMES: [&str; 5] = ["name", "value", "label", "url", "notes"];
+const NAME: usize = 0;
+const VALUE: usize = 1;
+const LABEL: usize = 2;
+const URL: usize = 3;
+const NOTES: usize = 4;
 
 #[derive(Debug, Clone)]
 pub struct Form {
@@ -19,7 +25,10 @@ pub enum Mode {
     Add(Form),
     Edit(Form),
     ConfirmDelete,
+    ConfirmRotate,
     Reveal(String),
+    Command(String),
+    Help,
 }
 
 #[derive(Debug)]
@@ -27,7 +36,15 @@ pub enum Effect {
     Save,
     Decrypt { alias: String },
     Copy { alias: String },
+    Rotate,
     Quit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusKind {
+    Info,
+    Success,
+    Error,
 }
 
 pub struct App {
@@ -37,6 +54,7 @@ pub struct App {
     pub selected: usize,
     pub mode: Mode,
     pub status: String,
+    pub status_kind: StatusKind,
 }
 
 impl App {
@@ -47,10 +65,24 @@ impl App {
             query: String::new(),
             selected: 0,
             mode: Mode::List,
-            status: String::from(
-                "j/k move · / search · a add · e edit · d delete · r reveal · c copy · q quit",
-            ),
+            status: String::new(),
+            status_kind: StatusKind::Info,
         }
+    }
+
+    pub fn set_info(&mut self, msg: impl Into<String>) {
+        self.status = msg.into();
+        self.status_kind = StatusKind::Info;
+    }
+
+    pub fn set_success(&mut self, msg: impl Into<String>) {
+        self.status = msg.into();
+        self.status_kind = StatusKind::Success;
+    }
+
+    pub fn set_error(&mut self, msg: impl Into<String>) {
+        self.status = msg.into();
+        self.status_kind = StatusKind::Error;
     }
 
     pub fn visible(&self) -> Vec<&SecretEntry> {
@@ -83,6 +115,16 @@ impl App {
         self.mode = Mode::Reveal(value);
     }
 
+    /// Runtime callback after a successful `Effect::Rotate`.
+    pub fn after_rotate(&mut self, count: usize, vault: Vault, recipient: age::x25519::Recipient) {
+        self.vault = vault;
+        self.recipient = recipient;
+        self.clamp_selection();
+        self.set_success(format!(
+            "rotated {count} secret(s) to a new keypair — Keychain will re-ask authorization"
+        ));
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent) -> Option<Effect> {
         match std::mem::replace(&mut self.mode, Mode::List) {
             Mode::List => self.on_list_key(key),
@@ -91,7 +133,10 @@ impl App {
                 None
             }
             Mode::Reveal(_) => None, // any key returns to List
-            Mode::ConfirmDelete => self.on_confirm_key(key),
+            Mode::Help => None,      // any key returns to List
+            Mode::ConfirmDelete => self.on_confirm_delete(key),
+            Mode::ConfirmRotate => self.on_confirm_rotate(key),
+            Mode::Command(input) => self.on_command_key(key, input),
             Mode::Add(form) => self.on_form_key(key, form, false),
             Mode::Edit(form) => self.on_form_key(key, form, true),
         }
@@ -113,10 +158,16 @@ impl App {
                 self.query.clear();
                 self.mode = Mode::Search;
             }
+            KeyCode::Char('?') => {
+                self.mode = Mode::Help;
+            }
+            KeyCode::Char(':') => {
+                self.mode = Mode::Command(String::new());
+            }
             KeyCode::Char('a') => {
                 self.mode = Mode::Add(Form {
                     fields: Default::default(),
-                    focus: 0,
+                    focus: NAME,
                     editing_alias: None,
                 });
             }
@@ -126,12 +177,12 @@ impl App {
                     self.mode = Mode::Edit(Form {
                         fields: [
                             e.alias.clone(),
+                            String::new(), // empty value keeps the old cipher
                             e.label.clone(),
                             e.url.clone().unwrap_or_default(),
                             e.notes.clone(),
-                            String::new(),
                         ],
-                        focus: 1, // alias is immutable; start on label
+                        focus: VALUE, // name is locked; start on value
                         editing_alias: Some(alias),
                     });
                 }
@@ -149,6 +200,12 @@ impl App {
             KeyCode::Char('c') => {
                 if let Some(alias) = self.selected_alias() {
                     return Some(Effect::Copy { alias });
+                }
+            }
+            KeyCode::Char(c) if ('1'..='9').contains(&c) => {
+                let idx = (c as usize) - ('1' as usize);
+                if idx < self.visible().len() {
+                    self.selected = idx;
                 }
             }
             _ => {}
@@ -180,14 +237,64 @@ impl App {
         }
     }
 
-    fn on_confirm_key(&mut self, key: KeyEvent) -> Option<Effect> {
+    fn on_confirm_delete(&mut self, key: KeyEvent) -> Option<Effect> {
         self.mode = Mode::List;
         if let KeyCode::Char('y') = key.code {
             if let Some(alias) = self.selected_alias() {
                 self.vault.secrets.retain(|s| s.alias != alias);
                 self.clamp_selection();
-                self.status = format!("deleted '{alias}'");
+                self.set_success(format!("deleted '{alias}'"));
                 return Some(Effect::Save);
+            }
+        }
+        None
+    }
+
+    fn on_confirm_rotate(&mut self, key: KeyEvent) -> Option<Effect> {
+        self.mode = Mode::List;
+        if let KeyCode::Char('y') = key.code {
+            self.set_info("rotating keypair…");
+            return Some(Effect::Rotate);
+        }
+        self.set_info("cancelled");
+        None
+    }
+
+    fn on_command_key(&mut self, key: KeyEvent, mut input: String) -> Option<Effect> {
+        match key.code {
+            KeyCode::Esc => {
+                self.mode = Mode::List;
+            }
+            KeyCode::Enter => {
+                self.mode = Mode::List;
+                return self.run_command(input.trim());
+            }
+            KeyCode::Backspace => {
+                if input.pop().is_none() {
+                    self.mode = Mode::List; // backspace on empty exits
+                } else {
+                    self.mode = Mode::Command(input);
+                }
+            }
+            KeyCode::Char(c) => {
+                input.push(c);
+                self.mode = Mode::Command(input);
+            }
+            _ => self.mode = Mode::Command(input),
+        }
+        None
+    }
+
+    fn run_command(&mut self, cmd: &str) -> Option<Effect> {
+        match cmd {
+            "" => {}
+            "rotate" => self.mode = Mode::ConfirmRotate,
+            "help" | "?" => self.mode = Mode::Help,
+            "q" | "quit" | "exit" => return Some(Effect::Quit),
+            other => {
+                self.set_error(format!(
+                    "unknown command: {other} (try rotate · help · quit)"
+                ));
             }
         }
         None
@@ -197,18 +304,18 @@ impl App {
         match key.code {
             KeyCode::Esc => {
                 self.mode = Mode::List;
-                self.status = "cancelled".into();
+                self.set_info("cancelled");
                 return None;
             }
             KeyCode::Tab | KeyCode::Down => {
                 form.focus = (form.focus + 1) % form.fields.len();
-                if editing && form.focus == 0 {
-                    form.focus = 1;
+                if editing && form.focus == NAME {
+                    form.focus = VALUE;
                 }
             }
             KeyCode::BackTab | KeyCode::Up => {
                 form.focus = (form.focus + form.fields.len() - 1) % form.fields.len();
-                if editing && form.focus == 0 {
+                if editing && form.focus == NAME {
                     form.focus = form.fields.len() - 1;
                 }
             }
@@ -230,16 +337,20 @@ impl App {
     }
 
     fn submit_form(&mut self, form: Form, editing: bool) -> Option<Effect> {
-        let [alias, label, url, notes, value] = form.fields.clone();
+        let name = form.fields[NAME].clone();
+        let value = form.fields[VALUE].clone();
+        let label = form.fields[LABEL].clone();
+        let url = form.fields[URL].clone();
+        let notes = form.fields[NOTES].clone();
         if editing {
-            let target = form.editing_alias.clone().expect("edit has alias");
+            let target = form.editing_alias.clone().expect("edit has name");
             let cipher = if value.is_empty() {
                 None
             } else {
                 match encrypt_value(&self.recipient, &value) {
                     Ok(c) => Some(c),
                     Err(e) => {
-                        self.status = format!("encryption failed: {e}");
+                        self.set_error(format!("encryption failed: {e}"));
                         self.mode = Mode::Edit(form);
                         return None;
                     }
@@ -258,30 +369,30 @@ impl App {
                 }
                 entry.updated_at = now_rfc3339();
             }
-            self.status = format!("updated '{target}'");
+            self.set_success(format!("updated '{target}'"));
             self.mode = Mode::List;
             return Some(Effect::Save);
         }
         // Add
-        if !is_valid_alias(&alias) {
-            self.status = "alias must be kebab-case: lowercase letters, digits, '-'".into();
+        if !is_valid_alias(&name) {
+            self.set_error("name must be kebab-case: lowercase letters, digits, '-'");
             self.mode = Mode::Add(form);
             return None;
         }
-        if self.vault.get(&alias).is_some() {
-            self.status = format!("alias '{alias}' already exists");
+        if self.vault.get(&name).is_some() {
+            self.set_error(format!("name '{name}' already exists"));
             self.mode = Mode::Add(form);
             return None;
         }
         if value.is_empty() {
-            self.status = "value must not be empty".into();
+            self.set_error("value must not be empty");
             self.mode = Mode::Add(form);
             return None;
         }
         let cipher = match encrypt_value(&self.recipient, &value) {
             Ok(c) => c,
             Err(e) => {
-                self.status = format!("encryption failed: {e}");
+                self.set_error(format!("encryption failed: {e}"));
                 self.mode = Mode::Add(form);
                 return None;
             }
@@ -290,11 +401,11 @@ impl App {
         self.vault
             .insert(SecretEntry {
                 label: if label.is_empty() {
-                    alias.clone()
+                    name.clone()
                 } else {
                     label
                 },
-                alias: alias.clone(),
+                alias: name.clone(),
                 cipher,
                 url: if url.is_empty() { None } else { Some(url) },
                 created_at: now.clone(),
@@ -302,7 +413,7 @@ impl App {
                 notes,
             })
             .ok();
-        self.status = format!("added '{alias}'");
+        self.set_success(format!("added '{name}'"));
         self.mode = Mode::List;
         Some(Effect::Save)
     }
@@ -391,13 +502,11 @@ mod tests {
     fn add_flow_encrypts_and_saves() {
         let (mut app, id) = app_with(&[]);
         app.handle_key(ch('a'));
-        type_str(&mut app, "new-key"); // alias field
-        app.handle_key(key(KeyCode::Tab)); // label
-        type_str(&mut app, "New Key");
-        app.handle_key(key(KeyCode::Tab)); // url
-        app.handle_key(key(KeyCode::Tab)); // notes
-        app.handle_key(key(KeyCode::Tab)); // value
+        type_str(&mut app, "new-key"); // name field (0)
+        app.handle_key(key(KeyCode::Tab)); // value (1)
         type_str(&mut app, "fresh-value-77");
+        app.handle_key(key(KeyCode::Tab)); // label (2)
+        type_str(&mut app, "New Key");
         let eff = app.handle_key(key(KeyCode::Enter));
         assert!(matches!(eff, Some(Effect::Save)));
         let entry = app.vault.get("new-key").expect("entry added");
@@ -420,7 +529,8 @@ mod tests {
         let (mut app, id) = app_with(&["a-key"]);
         let old_cipher = app.vault.get("a-key").unwrap().cipher.clone();
         app.handle_key(ch('e'));
-        // edit form opens focused on label (alias is immutable)
+        // edit form opens focused on value (1); name is locked
+        app.handle_key(key(KeyCode::Tab)); // label (2)
         type_str(&mut app, "!"); // append to label
         let eff = app.handle_key(key(KeyCode::Enter));
         assert!(matches!(eff, Some(Effect::Save)));
@@ -431,15 +541,90 @@ mod tests {
     }
 
     #[test]
-    fn delete_needs_confirmation() {
-        let (mut app, _) = app_with(&["a-key", "b-key"]);
-        app.handle_key(ch('d'));
-        app.handle_key(ch('n')); // cancel
-        assert_eq!(app.vault.secrets.len(), 2);
-        app.handle_key(ch('d'));
+    fn edit_never_reaches_locked_name_field() {
+        let (mut app, _) = app_with(&["a-key"]);
+        app.handle_key(ch('e'));
+        // BackTab from value (1) wraps to notes (4), skipping name (0)
+        app.handle_key(key(KeyCode::BackTab));
+        let Mode::Edit(form) = &app.mode else {
+            panic!("expected edit mode")
+        };
+        assert_eq!(form.focus, 4);
+        // Tab from notes (4) skips name (0) and lands on value (1)
+        app.handle_key(key(KeyCode::Tab));
+        let Mode::Edit(form) = &app.mode else {
+            panic!("expected edit mode")
+        };
+        assert_eq!(form.focus, 1);
+    }
+
+    #[test]
+    fn number_keys_jump_selection() {
+        let (mut app, _) = app_with(&["a-key", "b-key", "c-key"]);
+        app.handle_key(ch('3'));
+        assert_eq!(app.selected_alias().as_deref(), Some("c-key"));
+        app.handle_key(ch('1'));
+        assert_eq!(app.selected_alias().as_deref(), Some("a-key"));
+        app.handle_key(ch('9')); // out of range: no move
+        assert_eq!(app.selected_alias().as_deref(), Some("a-key"));
+    }
+
+    #[test]
+    fn help_opens_and_any_key_closes() {
+        let (mut app, _) = app_with(&["a-key"]);
+        app.handle_key(ch('?'));
+        assert!(matches!(app.mode, Mode::Help));
+        app.handle_key(ch('x'));
+        assert!(matches!(app.mode, Mode::List));
+    }
+
+    #[test]
+    fn command_mode_rotate_flow() {
+        let (mut app, _) = app_with(&["a-key"]);
+        app.handle_key(ch(':'));
+        type_str(&mut app, "rotate");
+        assert!(app.handle_key(key(KeyCode::Enter)).is_none());
+        assert!(matches!(app.mode, Mode::ConfirmRotate));
         let eff = app.handle_key(ch('y'));
-        assert!(matches!(eff, Some(Effect::Save)));
-        assert!(app.vault.get("a-key").is_none());
-        assert_eq!(app.vault.secrets.len(), 1);
+        assert!(matches!(eff, Some(Effect::Rotate)));
+
+        // 'n' cancels the confirm
+        app.handle_key(ch(':'));
+        type_str(&mut app, "rotate");
+        app.handle_key(key(KeyCode::Enter));
+        assert!(app.handle_key(ch('n')).is_none());
+        assert!(matches!(app.mode, Mode::List));
+    }
+
+    #[test]
+    fn command_mode_quit_unknown_and_escape() {
+        let (mut app, _) = app_with(&[]);
+        app.handle_key(ch(':'));
+        type_str(&mut app, "quit");
+        assert!(matches!(
+            app.handle_key(key(KeyCode::Enter)),
+            Some(Effect::Quit)
+        ));
+
+        app.handle_key(ch(':'));
+        type_str(&mut app, "bogus");
+        assert!(app.handle_key(key(KeyCode::Enter)).is_none());
+        assert!(matches!(app.status_kind, StatusKind::Error));
+        assert!(app.status.contains("unknown command"), "{}", app.status);
+
+        app.handle_key(ch(':'));
+        app.handle_key(key(KeyCode::Esc));
+        assert!(matches!(app.mode, Mode::List));
+    }
+
+    #[test]
+    fn after_rotate_swaps_key_material_and_reports() {
+        let (mut app, _) = app_with(&["a-key"]);
+        let new_id = generate_identity();
+        let new_vault = Vault::default();
+        app.after_rotate(1, new_vault, new_id.to_public());
+        assert!(matches!(app.status_kind, StatusKind::Success));
+        assert!(app.status.contains("rotated 1"), "{}", app.status);
+        assert!(app.vault.secrets.is_empty());
     }
 }

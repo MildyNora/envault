@@ -58,21 +58,28 @@ fn event_loop(app: &mut App, home: &std::path::Path) -> Result<()> {
             Some(Effect::Quit) => return Ok(()),
             Some(Effect::Save) => {
                 if let Err(e) = app.vault.save(home) {
-                    app.status = format!("save failed: {e:#}");
+                    app.set_error(format!("save failed: {e:#}"));
                 }
             }
             Some(Effect::Decrypt { alias }) => match decrypt(app, &alias) {
                 Ok(value) => app.provide_plaintext(value),
-                Err(e) => app.status = format!("decrypt failed: {e:#}"),
+                Err(e) => app.set_error(format!("decrypt failed: {e:#}")),
             },
             Some(Effect::Copy { alias }) => match decrypt(app, &alias) {
                 Ok(value) => match copy_with_autoclear(value) {
                     Ok(()) => {
-                        app.status = format!("'{alias}' copied — clipboard clears in 15s");
+                        app.set_success(format!("'{alias}' copied — clipboard clears in 15s"));
                     }
-                    Err(e) => app.status = format!("clipboard failed: {e:#}"),
+                    Err(e) => app.set_error(format!("clipboard failed: {e:#}")),
                 },
-                Err(e) => app.status = format!("decrypt failed: {e:#}"),
+                Err(e) => app.set_error(format!("decrypt failed: {e:#}")),
+            },
+            Some(Effect::Rotate) => match crate::commands::rotate::rotate_in_place(home) {
+                Ok(outcome) => match Vault::load(home) {
+                    Ok(v) => app.after_rotate(outcome.count, v, outcome.recipient),
+                    Err(e) => app.set_error(format!("vault reload failed: {e:#}")),
+                },
+                Err(e) => app.set_error(format!("rotate failed: {e:#}")),
             },
         }
     }
