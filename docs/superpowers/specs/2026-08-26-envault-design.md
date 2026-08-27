@@ -89,7 +89,7 @@ dashboard; the value never transits the chat.
   {
     "alias": "openrouter",          // unique, kebab-case
     "label": "OpenRouter API key",
-    "cipher": "<armored age ciphertext>",
+    "cipher": "<base64-encoded age ciphertext>",
     "url": "https://openrouter.ai", // optional; used by `fill` guard
     "created_at": "...", "updated_at": "...", "notes": ""
   }
@@ -111,7 +111,7 @@ surface, human-at-terminal only.
 | `envault` | Open TUI dashboard (requires a TTY; refuses otherwise) | blocked by guardrail |
 | `envault init` | First-run wizard: keypair → Keychain, create `~/.envault/` | yes |
 | `envault ls --json` | Aliases + labels + dates. Never values. | **yes — the agent's read** |
-| `envault add <alias>` | Prompt (hidden input) for a value, encrypt, store | write-only, yes |
+| `envault add <alias>` | Prompt (hidden input) for a value — or read it from stdin with `--stdin` for piping — encrypt, store | write-only, yes |
 | `envault link <ENV_VAR> <alias>` | Add mapping to `envault.toml` | yes |
 | `envault import <file>` | Parse dotenv file, encrypt all values, create aliases (kebab of var name), write manifest mappings, print summary + suggest deleting the file (never auto-deletes) | yes (consumes values) |
 | `envault run [flags] -- <cmd>` | Inject + mask (§7) | yes — masking protects |
