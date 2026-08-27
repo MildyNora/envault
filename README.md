@@ -3,9 +3,14 @@
 Local secrets vault for agentic coding. Agents see **aliases** and **ciphers** —
 plaintext exists only inside the process that needs it.
 
+**Platforms:** macOS (Keychain), Windows (Credential Manager), and Linux
+(Secret Service). The dashboard, `run`, and rotation work on all three; the
+`request` popup opens a Terminal window on macOS, a Windows Terminal/PowerShell
+window on Windows, and a terminal emulator on Linux.
+
 ## Quickstart
 
-    envault init                          # keypair -> macOS Keychain
+    envault init                          # keypair -> OS secret store
     envault add openrouter                # value typed at a hidden prompt
     envault link OPENROUTER_API_KEY openrouter
     envault run -- npm start              # injected + masked
@@ -24,6 +29,8 @@ plaintext exists only inside the process that needs it.
   the value; if the secret has a `url`, filling on a different host is
   refused. Don't screenshot right after filling a visible (non-password)
   field — password inputs render masked, plain text fields don't.
+- The `envault` dashboard **live-updates**: if a secret is added while it's
+  open (e.g. a granted `envault request`), it reloads within ~500ms.
 
 ## Agent integration (Claude Code plugin)
 

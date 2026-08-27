@@ -1,6 +1,6 @@
 [package]
 name = "envault"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 description = "Local secrets vault for agentic coding: agents see aliases and ciphers, never plaintext"
 license = "MIT"
@@ -15,7 +15,6 @@ clap = { version = "4", features = ["derive"] }
 crossterm = "0.28"
 dirs = "5"
 dotenvy = "0.15"
-keyring = { version = "3", features = ["apple-native"] }
 portable-pty = "0.8"
 ratatui = "0.29"
 rpassword = "7"
@@ -26,6 +25,17 @@ tungstenite = "0.24"
 ureq = { version = "2", features = ["json"] }
 url = "2"
 urlencoding = "2"
+
+# Secret store backend, per platform: Keychain (macOS), Credential Manager
+# (Windows), Secret Service (Linux).
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", features = ["apple-native"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "3", features = ["windows-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3", features = ["sync-secret-service", "crypto-rust"] }
 
 [dev-dependencies]
 assert_cmd = "2"

@@ -38,11 +38,10 @@ impl Vault {
     }
 
     pub fn save(&self, home: &Path) -> Result<()> {
-        use std::os::unix::fs::PermissionsExt;
         fs::create_dir_all(home)?;
         let path = vault_file(home);
         fs::write(&path, serde_json::to_string_pretty(self)?)?;
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+        crate::platform::set_mode(&path, 0o600)?;
         Ok(())
     }
 
@@ -117,6 +116,7 @@ mod tests {
         assert!(err.contains("already exists"), "got: {err}");
     }
 
+    #[cfg(unix)]
     #[test]
     fn vault_json_is_mode_600() {
         use std::os::unix::fs::PermissionsExt;

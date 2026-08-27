@@ -10,9 +10,8 @@ pub fn cmd_init() -> Result<()> {
     if paths::vault_file(&home).exists() {
         bail!("already initialized at {}", home.display());
     }
-    use std::os::unix::fs::PermissionsExt;
     fs::create_dir_all(&home)?;
-    fs::set_permissions(&home, fs::Permissions::from_mode(0o700))?;
+    crate::platform::set_mode(&home, 0o700)?;
 
     let identity = crypto::generate_identity();
     crypto::store_identity(&identity, &home)?;

@@ -36,8 +36,7 @@ pub fn rotate_in_place(home: &Path) -> Result<RotateOutcome> {
     // nothing has changed; the lockout window is just the rename.
     let staged = home.join("vault.json.new");
     fs::write(&staged, serde_json::to_string_pretty(&vault)?)?;
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(&staged, fs::Permissions::from_mode(0o600))?;
+    crate::platform::set_mode(&staged, 0o600)?;
 
     // Delete-then-create gives the new Keychain item a fresh ACL, so macOS
     // asks for authorization again: rotation revokes every prior grant.

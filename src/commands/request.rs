@@ -232,17 +232,17 @@ fn new_session_dir(home: &Path) -> Result<PathBuf> {
         let dir = base.join(format!("{}-{n}", std::process::id()));
         if !dir.exists() {
             std::fs::create_dir(&dir)?;
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+            crate::platform::set_mode(&dir, 0o700)?;
             return Ok(dir);
         }
         n += 1;
     }
 }
 
+/// macOS: open a small centered Terminal.app window running the request TUI.
+#[cfg(target_os = "macos")]
 fn spawn_window(exe: &Path, session: &Path) -> Result<()> {
-    // Run the window command in a new Terminal.app window, telling it which
-    // session to report into. AppleScript's `do script` opens the window.
+    use std::process::Stdio;
     // Carry the caller's vault selection into the fresh login shell that
     // `do script` spawns, so the window writes to the same vault we checked.
     let mut env_prefix = String::new();
@@ -256,8 +256,6 @@ fn spawn_window(exe: &Path, session: &Path) -> Result<()> {
         session = shell_quote(&session.to_string_lossy()),
         exe = shell_quote(&exe.to_string_lossy()),
     );
-    // Open the window, then resize it to a small, centered popup so it reads as
-    // a temporary dialog rather than a full terminal.
     let script = format!(
         "tell application \"Finder\" to set sb to bounds of window of desktop\n\
          set sw to item 3 of sb\n\
@@ -276,19 +274,112 @@ fn spawn_window(exe: &Path, session: &Path) -> Result<()> {
          end tell",
         applescript_escape(&cmd),
     );
-    // Suppress osascript's own output (e.g. "tab 1 of window id 2035") so it
-    // never pollutes our stdout, which the calling agent parses.
+    // Suppress osascript's own output so it never pollutes our stdout.
     let status = std::process::Command::new("osascript")
         .arg("-e")
         .arg(&script)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .context("launching osascript")?;
     if !status.success() {
         bail!("osascript exited with {status}");
     }
     Ok(())
+}
+
+/// Windows: open a fresh window running the request TUI — Windows Terminal
+/// (`wt`) if present for a nicer look, else a PowerShell console. Either way
+/// the window closes on its own when the process exits. The child inherits our
+/// environment, so ENVAULT_HOME/ENVAULT_IDENTITY_FILE carry over.
+#[cfg(target_os = "windows")]
+fn spawn_window(exe: &Path, session: &Path) -> Result<()> {
+    use std::process::Stdio;
+    let exe = exe.to_string_lossy().to_string();
+    let session = session.to_string_lossy().to_string();
+
+    // Prefer Windows Terminal, sized to a small popup.
+    let wt = std::process::Command::new("wt")
+        .args([
+            "--size",
+            "84,26",
+            "new-tab",
+            "--title",
+            "envault - secret request",
+        ])
+        .arg(&exe)
+        .arg("request-window")
+        .arg(&session)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+    if wt.is_ok() {
+        return Ok(());
+    }
+
+    // Fallback: a plain PowerShell console window via Start-Process.
+    let ps = format!(
+        "Start-Process -FilePath {} -ArgumentList @('request-window', {})",
+        ps_quote(&exe),
+        ps_quote(&session),
+    );
+    let status = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &ps])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .context("launching powershell")?;
+    if !status.success() {
+        bail!("could not open a PowerShell window");
+    }
+    Ok(())
+}
+
+/// Linux/BSD: try a few common terminal emulators; each runs our command and
+/// closes when it exits. Returns Err if none are found (caller falls back to
+/// running inline).
+#[cfg(all(unix, not(target_os = "macos")))]
+fn spawn_window(exe: &Path, session: &Path) -> Result<()> {
+    use std::process::Stdio;
+    let inner = format!(
+        "{} request-window {}",
+        shell_quote(&exe.to_string_lossy()),
+        shell_quote(&session.to_string_lossy()),
+    );
+    // (program, args) — most emulators take `-e <cmd...>`.
+    let attempts: [(&str, Vec<String>); 5] = [
+        (
+            "x-terminal-emulator",
+            vec!["-e".into(), "sh".into(), "-c".into(), inner.clone()],
+        ),
+        (
+            "gnome-terminal",
+            vec!["--".into(), "sh".into(), "-c".into(), inner.clone()],
+        ),
+        (
+            "konsole",
+            vec!["-e".into(), "sh".into(), "-c".into(), inner.clone()],
+        ),
+        (
+            "xterm",
+            vec!["-e".into(), "sh".into(), "-c".into(), inner.clone()],
+        ),
+        (
+            "alacritty",
+            vec!["-e".into(), "sh".into(), "-c".into(), inner.clone()],
+        ),
+    ];
+    for (term, args) in attempts {
+        let spawned = std::process::Command::new(term)
+            .args(&args)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+        if spawned.is_ok() {
+            return Ok(());
+        }
+    }
+    bail!("no supported terminal emulator found (tried gnome-terminal, konsole, xterm, alacritty)");
 }
 
 fn wait_for_result(result_path: &Path, timeout_secs: u64) -> Result<Option<ResultFile>> {
@@ -333,6 +424,8 @@ fn run_window(meta: &RequestMeta) -> Result<Outcome> {
 /// The controlling terminal device of this process, e.g. `/dev/ttys003`.
 /// `tty` must inherit our real stdin (fd 0) — `Command::output()` nulls stdin
 /// by default, which would make `tty` report "not a tty" and return None.
+/// Only macOS needs it (to close its Terminal window by tty).
+#[cfg(target_os = "macos")]
 fn current_tty() -> Option<String> {
     let out = std::process::Command::new("tty")
         .stdin(std::process::Stdio::inherit())
@@ -347,10 +440,18 @@ fn current_tty() -> Option<String> {
     }
 }
 
-/// Close the spawned window from the parent (which is not inside it). The
-/// window process has just written its result and is exiting; a short wait lets
-/// it fully exit so the window is an idle login shell, which Terminal closes
-/// with no confirmation dialog. `saving no` suppresses any save prompt.
+/// Non-macOS: no tty tracking needed — Windows consoles and Linux terminal
+/// emulators close on their own when the launched process exits.
+#[cfg(not(target_os = "macos"))]
+fn current_tty() -> Option<String> {
+    None
+}
+
+/// macOS: close the spawned Terminal window from the parent (which is outside
+/// it). The window's process has written its result and is exiting; a short
+/// wait lets it become an idle login shell, which Terminal closes with no
+/// confirmation dialog. `saving no` suppresses any save prompt.
+#[cfg(target_os = "macos")]
 fn close_spawned_window(session: &Path) {
     let Ok(tty) = std::fs::read_to_string(session.join("window.tty")) else {
         return;
@@ -359,9 +460,6 @@ fn close_spawned_window(session: &Path) {
     if tty.is_empty() {
         return;
     }
-    // Just long enough for the window's process to finish exiting (so the
-    // window is an idle login shell and Terminal closes it with no prompt),
-    // but short enough to feel immediate after Enter.
     std::thread::sleep(std::time::Duration::from_millis(200));
     let script = format!(
         "tell application \"Terminal\" to close (every window whose tty is \"{}\") saving no",
@@ -375,8 +473,13 @@ fn close_spawned_window(session: &Path) {
         .status();
 }
 
+/// Non-macOS: nothing to do — the window closes itself when its process exits.
+#[cfg(not(target_os = "macos"))]
+fn close_spawned_window(_session: &Path) {}
+
 /// A short, human-meaningful description of the process that launched us, for
-/// cross-checking the agent's claimed `--agent` identity.
+/// cross-checking the agent's claimed `--agent` identity. Unix uses `ps`.
+#[cfg(unix)]
 fn caller_description() -> String {
     let ppid = parent_pid();
     let comm = ppid
@@ -395,6 +498,7 @@ fn caller_description() -> String {
     }
 }
 
+#[cfg(unix)]
 fn parent_pid() -> Option<u32> {
     let out = std::process::Command::new("ps")
         .args(["-o", "ppid=", "-p", &std::process::id().to_string()])
@@ -403,10 +507,35 @@ fn parent_pid() -> Option<u32> {
     String::from_utf8_lossy(&out.stdout).trim().parse().ok()
 }
 
+/// Windows: look up our parent process via PowerShell/CIM (best effort).
+#[cfg(windows)]
+fn caller_description() -> String {
+    let pid = std::process::id();
+    let ps = format!(
+        "$pp=(Get-CimInstance Win32_Process -Filter 'ProcessId={pid}').ParentProcessId; \
+         $n=(Get-Process -Id $pp -ErrorAction SilentlyContinue).ProcessName; \
+         if ($n) {{ \"$n (pid $pp)\" }} else {{ \"pid $pp\" }}"
+    );
+    std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &ps])
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "a local process".into())
+}
+
+#[cfg(unix)]
 fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
+#[cfg(windows)]
+fn ps_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "''"))
+}
+
+#[cfg(target_os = "macos")]
 fn applescript_escape(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }
