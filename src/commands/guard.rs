@@ -34,7 +34,9 @@ pub fn guard_decision(
 
     if tool_name == "Bash" {
         if let Some(cmd) = tool_input.get("command").and_then(|c| c.as_str()) {
-            let bare_tui = cmd.split([';', '&', '|', '\n']).any(|seg| seg.trim() == "envault");
+            let bare_tui = cmd
+                .split([';', '&', '|', '\n'])
+                .any(|seg| seg.trim() == "envault");
             if bare_tui {
                 return Some(
                     "envault guard: the envault TUI dashboard is human-only. \
@@ -57,7 +59,10 @@ pub fn cmd_guard_check() -> Result<i32> {
             return Ok(0);
         }
     };
-    let tool_name = parsed.get("tool_name").and_then(|t| t.as_str()).unwrap_or("");
+    let tool_name = parsed
+        .get("tool_name")
+        .and_then(|t| t.as_str())
+        .unwrap_or("");
     let empty = serde_json::Value::Object(Default::default());
     let tool_input = parsed.get("tool_input").unwrap_or(&empty);
     let home = paths::envault_home();
@@ -81,7 +86,10 @@ mod tests {
     fn blocks_reads_of_vault_dir() {
         for tool in ["Read", "Edit", "Write", "Glob", "Grep"] {
             let input = json!({"file_path": "/Users/tester/.envault/vault.json"});
-            assert!(guard_decision(tool, &input, HOME).is_some(), "{tool} should block");
+            assert!(
+                guard_decision(tool, &input, HOME).is_some(),
+                "{tool} should block"
+            );
         }
         let tilde = json!({"file_path": "~/.envault/vault.json"});
         assert!(guard_decision("Read", &tilde, HOME).is_some());
