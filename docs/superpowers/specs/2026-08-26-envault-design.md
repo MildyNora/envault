@@ -117,6 +117,7 @@ surface, human-at-terminal only.
 | `envault run [flags] -- <cmd>` | Inject + mask (§7) | yes — masking protects |
 | `envault fill <alias> [--selector S]` | Browser form-fill via CDP (§10) | yes — value bypasses agent |
 | `envault guard-check` | Internal: hook helper for the plugin (§8) | yes |
+| `envault rotate` | Re-encrypt every secret to a brand-new keypair. Deletes and recreates the Keychain item so its ACL resets — macOS re-asks for authorization, revoking every previously granted "Always Allow". Decrypts all entries up front and stages the new vault before swapping keys, so a failure aborts with nothing changed. | **no — human-only, guard-blocked** |
 
 ## 7. `envault run` — injection and masking
 
@@ -235,3 +236,4 @@ secret rotation reminders.
 | Vault scope | Global (`~/.envault`), per-repo manifest | One dashboard for everything |
 | Agent read surface | `envault ls --json` only | Names, never values |
 | MVP platform | macOS | User's machine; keyring crate keeps ports open |
+| Key rotation | `envault rotate`, human-only; fresh Keychain item resets the ACL | User choice: re-granting "Always Allow" after rotation is the accepted safety compromise |

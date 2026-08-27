@@ -65,6 +65,21 @@ pub fn load_identity() -> Result<age::x25519::Identity> {
         .map_err(|e| anyhow::anyhow!("invalid age identity: {e}"))
 }
 
+pub fn delete_identity() -> Result<()> {
+    if let Some(path) = identity_file_override() {
+        if path.exists() {
+            fs::remove_file(&path)?;
+        }
+        return Ok(());
+    }
+    let entry = keyring::Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT)
+        .context("opening Keychain entry")?;
+    match entry.delete_credential() {
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(e) => Err(e).context("deleting the old identity from the Keychain"),
+    }
+}
+
 pub fn store_recipient(identity: &age::x25519::Identity, home: &Path) -> Result<()> {
     fs::create_dir_all(home)?;
     fs::write(

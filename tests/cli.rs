@@ -428,6 +428,67 @@ fn fill_refuses_on_host_mismatch() {
 }
 
 #[test]
+fn rotate_reencrypts_and_values_survive() {
+    let te = TestEnv::new();
+    te.init();
+    te.envault()
+        .args(["add", "rot-key", "--stdin"])
+        .write_stdin("rotate-me-value-1\n")
+        .assert()
+        .success();
+    te.envault()
+        .args(["add", "rot-two", "--stdin"])
+        .write_stdin("second-value-22\n")
+        .assert()
+        .success();
+    let old_recipient = std::fs::read_to_string(te.home.path().join("recipient.txt")).unwrap();
+    let old_identity = std::fs::read_to_string(te.identity_file()).unwrap();
+    let old_vault = std::fs::read_to_string(te.home.path().join("vault.json")).unwrap();
+
+    te.envault()
+        .arg("rotate")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Rotated 2"));
+
+    // keypair and every cipher replaced; staging file cleaned up
+    let new_vault = std::fs::read_to_string(te.home.path().join("vault.json")).unwrap();
+    assert_ne!(
+        old_recipient,
+        std::fs::read_to_string(te.home.path().join("recipient.txt")).unwrap()
+    );
+    assert_ne!(
+        old_identity,
+        std::fs::read_to_string(te.identity_file()).unwrap()
+    );
+    assert_ne!(old_vault, new_vault);
+    assert!(!new_vault.contains("rotate-me-value-1"));
+    assert!(!te.home.path().join("vault.json.new").exists());
+
+    // the decrypted value is still exactly right (compared inside the child,
+    // never printed), and masking still works
+    let out = te
+        .envault()
+        .args([
+            "run",
+            "--env",
+            "K=rot-key",
+            "--",
+            "sh",
+            "-c",
+            "test \"$K\" = \"rotate-me-value-1\" && echo MATCH k=$K",
+        ])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(stdout.contains("MATCH"), "stdout: {stdout}");
+    assert!(stdout.contains("k=[envault:rot-key]"), "stdout: {stdout}");
+
+    // rotating again from the new key also works
+    te.envault().arg("rotate").assert().success();
+}
+
+#[test]
 fn init_twice_fails() {
     let te = TestEnv::new();
     te.init();

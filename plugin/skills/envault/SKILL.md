@@ -17,6 +17,9 @@ processes launched by `envault run`. Follow these rules exactly.
   human-only and blocked by hooks.
 - Never try to unmask `[envault:<alias>]` text in command output. That marker
   means injection WORKED; it is not an error.
+- Never run `envault rotate` — key rotation replaces the vault keypair and
+  revokes Keychain grants, so it is human-only (and blocked by hooks). If
+  rotation seems needed, ask the user to run it in their own terminal.
 
 ## Workflow
 

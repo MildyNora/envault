@@ -59,6 +59,8 @@ enum Cmd {
     GuardCheck,
     /// Encrypt every entry of a dotenv file into the vault and link it
     Import { file: std::path::PathBuf },
+    /// Re-encrypt the vault to a brand-new keypair (revokes Keychain grants)
+    Rotate,
     /// Run a command with secrets injected and masked out of its output
     Run {
         #[arg(long)]
@@ -98,6 +100,7 @@ fn main() {
             Err(e) => Err(e),
         },
         Some(Cmd::Import { file }) => commands::import::cmd_import(file),
+        Some(Cmd::Rotate) => commands::rotate::cmd_rotate(),
         Some(Cmd::Run {
             manifest,
             env,

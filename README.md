@@ -14,6 +14,10 @@ plaintext exists only inside the process that needs it.
 - `envault import .env` — encrypt an existing dotenv file, then delete it.
 - Output of `envault run` is masked: injected values (and their base64/URL
   forms) print as `[envault:<alias>]`.
+- `envault rotate` — re-encrypt the whole vault to a brand-new keypair. The
+  Keychain item is deleted and recreated, so macOS asks for authorization
+  again (re-grant "Always Allow") — intentional: rotation revokes every
+  previously trusted binary. Human-only; the plugin blocks agents from it.
 - `envault fill <alias> --selector '#password'` — type a secret straight into
   a browser page over CDP (launch the browser with
   `--remote-debugging-port=9222`). The agent driving the browser never sees
