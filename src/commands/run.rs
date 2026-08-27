@@ -47,7 +47,7 @@ pub fn cmd_run(args: RunArgs) -> Result<i32> {
     let manifest_path = args.manifest.clone().or_else(|| find_manifest(&cwd));
     if let Some(path) = &manifest_path {
         let m = crate::manifest::Manifest::load(path)?;
-        mappings.extend(m.mappings.into_iter());
+        mappings.extend(m.mappings);
     }
     for spec in &args.env {
         let (var, alias) = spec
@@ -65,9 +65,15 @@ pub fn cmd_run(args: RunArgs) -> Result<i32> {
 
     // 2. Resolve aliases against the vault; report ALL missing at once.
     let home = paths::envault_home();
-    let vault = if mappings.is_empty() { Vault::default() } else { Vault::load(&home)? };
-    let missing: Vec<&(String, String)> =
-        mappings.iter().filter(|(_, a)| vault.get(a).is_none()).collect();
+    let vault = if mappings.is_empty() {
+        Vault::default()
+    } else {
+        Vault::load(&home)?
+    };
+    let missing: Vec<&(String, String)> = mappings
+        .iter()
+        .filter(|(_, a)| vault.get(a).is_none())
+        .collect();
     if !missing.is_empty() && !args.allow_missing {
         let list = missing
             .iter()
@@ -88,13 +94,20 @@ pub fn cmd_run(args: RunArgs) -> Result<i32> {
             }
         }
     }
-    let masker_input: Vec<(String, String)> =
-        injected.iter().map(|(_, a, v)| (a.clone(), v.clone())).collect();
+    let masker_input: Vec<(String, String)> = injected
+        .iter()
+        .map(|(_, a, v)| (a.clone(), v.clone()))
+        .collect();
 
     // 4. Spawn in a PTY.
     let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
     let pair = native_pty_system()
-        .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
+        .openpty(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
         .context("opening pty")?;
     let mut cmd = CommandBuilder::new(&args.command[0]);
     cmd.args(&args.command[1..]);

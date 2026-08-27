@@ -4,7 +4,9 @@ pub fn envault_home() -> PathBuf {
     if let Ok(h) = std::env::var("ENVAULT_HOME") {
         return PathBuf::from(h);
     }
-    dirs::home_dir().expect("no home directory").join(".envault")
+    dirs::home_dir()
+        .expect("no home directory")
+        .join(".envault")
 }
 
 pub fn vault_file(home: &Path) -> PathBuf {

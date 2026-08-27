@@ -46,6 +46,12 @@ impl TestEnv {
     }
 }
 
+impl Default for TestEnv {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[test]
 fn init_creates_vault_recipient_and_identity() {
     let te = TestEnv::new();
@@ -75,7 +81,10 @@ fn add_then_ls_shows_alias_but_never_value() {
     let rows: serde_json::Value = serde_json::from_str(&stdout).unwrap();
     assert_eq!(rows[0]["alias"], "openrouter");
     assert_eq!(rows[0]["label"], "OpenRouter key");
-    assert!(rows[0].get("cipher").is_none(), "ls must not expose ciphers");
+    assert!(
+        rows[0].get("cipher").is_none(),
+        "ls must not expose ciphers"
+    );
 
     // the plaintext value exists nowhere on disk
     let vault_raw = std::fs::read_to_string(te.home.path().join("vault.json")).unwrap();
@@ -141,7 +150,10 @@ fn run_injects_and_masks_output() {
         .write_stdin("supersecret-value-9\n")
         .assert()
         .success();
-    te.envault().args(["link", "MY_KEY", "my-key"]).assert().success();
+    te.envault()
+        .args(["link", "MY_KEY", "my-key"])
+        .assert()
+        .success();
 
     let out = te
         .envault()
@@ -149,7 +161,10 @@ fn run_injects_and_masks_output() {
         .assert()
         .success();
     let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
-    assert!(stdout.contains("got: [envault:my-key]"), "stdout was: {stdout}");
+    assert!(
+        stdout.contains("got: [envault:my-key]"),
+        "stdout was: {stdout}"
+    );
     assert!(!stdout.contains("supersecret-value-9"));
 }
 
@@ -191,7 +206,15 @@ fn run_extra_env_flag_maps_alias() {
         .success();
     let out = te
         .envault()
-        .args(["run", "--env", "EXTRA=extra", "--", "sh", "-c", "echo e=$EXTRA"])
+        .args([
+            "run",
+            "--env",
+            "EXTRA=extra",
+            "--",
+            "sh",
+            "-c",
+            "echo e=$EXTRA",
+        ])
         .assert()
         .success();
     let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();

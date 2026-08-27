@@ -12,7 +12,9 @@ pub fn encrypt_value(recipient: &age::x25519::Recipient, plaintext: &str) -> Res
 }
 
 pub fn decrypt_value(identity: &age::x25519::Identity, cipher_b64: &str) -> Result<String> {
-    let bytes = B64.decode(cipher_b64.trim()).context("cipher is not valid base64")?;
+    let bytes = B64
+        .decode(cipher_b64.trim())
+        .context("cipher is not valid base64")?;
     let plain = age::decrypt(identity, &bytes)
         .context("decryption failed (wrong key or corrupt cipher)")?;
     String::from_utf8(plain).context("decrypted value is not UTF-8")
@@ -75,7 +77,10 @@ pub fn store_recipient(identity: &age::x25519::Identity, home: &Path) -> Result<
 pub fn load_recipient(home: &Path) -> Result<age::x25519::Recipient> {
     let path = crate::paths::recipient_file(home);
     if !path.exists() {
-        anyhow::bail!("no recipient at {} — run `envault init` first", path.display());
+        anyhow::bail!(
+            "no recipient at {} — run `envault init` first",
+            path.display()
+        );
     }
     let raw = fs::read_to_string(&path)?;
     age::x25519::Recipient::from_str(raw.trim())

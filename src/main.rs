@@ -8,7 +8,11 @@ mod paths;
 mod store;
 
 #[derive(Parser)]
-#[command(name = "envault", version, about = "Local secrets vault: agents see aliases and ciphers, never plaintext")]
+#[command(
+    name = "envault",
+    version,
+    about = "Local secrets vault: agents see aliases and ciphers, never plaintext"
+)]
 struct Cli {
     #[command(subcommand)]
     cmd: Option<Cmd>,
@@ -65,13 +69,22 @@ fn main() {
             Ok(())
         }
         Some(Cmd::Init) => commands::init::cmd_init(),
-        Some(Cmd::Add { alias, label, url, notes, stdin }) => {
-            commands::add::cmd_add(alias, label, url, notes, stdin)
-        }
+        Some(Cmd::Add {
+            alias,
+            label,
+            url,
+            notes,
+            stdin,
+        }) => commands::add::cmd_add(alias, label, url, notes, stdin),
         Some(Cmd::Ls { json }) => commands::ls::cmd_ls(json),
         Some(Cmd::Link { env_var, alias }) => commands::link::cmd_link(env_var, alias),
         Some(Cmd::Import { file }) => commands::import::cmd_import(file),
-        Some(Cmd::Run { manifest, env, allow_missing, command }) => {
+        Some(Cmd::Run {
+            manifest,
+            env,
+            allow_missing,
+            command,
+        }) => {
             match commands::run::cmd_run(commands::run::RunArgs {
                 manifest,
                 env,

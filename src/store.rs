@@ -27,9 +27,13 @@ impl Vault {
     pub fn load(home: &Path) -> Result<Vault> {
         let path = vault_file(home);
         if !path.exists() {
-            bail!("no vault found at {} — run `envault init` first", path.display());
+            bail!(
+                "no vault found at {} — run `envault init` first",
+                path.display()
+            );
         }
-        let raw = fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+        let raw =
+            fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
         serde_json::from_str(&raw).with_context(|| format!("parsing {}", path.display()))
     }
 
@@ -51,7 +55,7 @@ impl Vault {
             bail!("alias '{}' already exists", e.alias);
         }
         self.secrets.push(e);
-        self.secrets.sort_by(|a, b| a.alias.cmp(&b.alias));
+        self.secrets.sort_by_key(|s| s.alias.clone());
         Ok(())
     }
 }
@@ -66,7 +70,8 @@ pub fn is_valid_alias(s: &str) -> bool {
         Some(c) if c.is_ascii_lowercase() || c.is_ascii_digit() => {}
         _ => return false,
     }
-    s.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    s.chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
 #[cfg(test)]

@@ -28,9 +28,17 @@ impl Masker {
             }
         }
         // longest first, so a longer form wins when forms overlap
-        patterns.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
-        let holdback = patterns.iter().map(|(p, _)| p.len()).max().map_or(0, |m| m - 1);
-        Masker { patterns, buf: Vec::new(), holdback }
+        patterns.sort_by_key(|(p, _)| std::cmp::Reverse(p.len()));
+        let holdback = patterns
+            .iter()
+            .map(|(p, _)| p.len())
+            .max()
+            .map_or(0, |m| m - 1);
+        Masker {
+            patterns,
+            buf: Vec::new(),
+            holdback,
+        }
     }
 
     /// Replace every full pattern occurrence currently in the buffer.
@@ -99,7 +107,10 @@ mod tests {
         let mut out = m.feed(b"key is sk-or-v1");
         out.extend(m.feed(b"-abc123 ok"));
         out.extend(m.flush());
-        assert_eq!(String::from_utf8(out).unwrap(), "key is [envault:openrouter] ok");
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "key is [envault:openrouter] ok"
+        );
     }
 
     #[test]

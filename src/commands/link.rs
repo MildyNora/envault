@@ -15,7 +15,10 @@ pub fn cmd_link(env_var: String, alias: String) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let mut manifest = match find_manifest(&cwd) {
         Some(path) => Manifest::load(&path)?,
-        None => Manifest { path: cwd.join(MANIFEST_NAME), mappings: Default::default() },
+        None => Manifest {
+            path: cwd.join(MANIFEST_NAME),
+            mappings: Default::default(),
+        },
     };
     manifest.mappings.insert(env_var.clone(), alias.clone());
     manifest.save()?;

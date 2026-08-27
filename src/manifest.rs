@@ -24,12 +24,14 @@ pub struct Manifest {
 
 impl Manifest {
     pub fn load(path: &Path) -> Result<Manifest> {
-        let raw = std::fs::read_to_string(path)
-            .with_context(|| format!("reading {}", path.display()))?;
+        let raw =
+            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         let value: toml::Value = raw
             .parse()
             .with_context(|| format!("parsing {}", path.display()))?;
-        let table = value.as_table().context("envault.toml must be a TOML table")?;
+        let table = value
+            .as_table()
+            .context("envault.toml must be a TOML table")?;
         let mut mappings = BTreeMap::new();
         for (k, v) in table {
             match v.as_str() {
@@ -41,7 +43,10 @@ impl Manifest {
                 ),
             }
         }
-        Ok(Manifest { path: path.to_path_buf(), mappings })
+        Ok(Manifest {
+            path: path.to_path_buf(),
+            mappings,
+        })
     }
 
     pub fn save(&self) -> Result<()> {
@@ -51,8 +56,7 @@ impl Manifest {
         for (k, v) in &self.mappings {
             out.push_str(&format!("{k} = \"{v}\"\n"));
         }
-        std::fs::write(&self.path, out)
-            .with_context(|| format!("writing {}", self.path.display()))
+        std::fs::write(&self.path, out).with_context(|| format!("writing {}", self.path.display()))
     }
 }
 
