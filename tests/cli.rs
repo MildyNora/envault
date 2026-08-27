@@ -60,6 +60,55 @@ fn init_creates_vault_recipient_and_identity() {
 }
 
 #[test]
+fn add_then_ls_shows_alias_but_never_value() {
+    let te = TestEnv::new();
+    te.init();
+    te.envault()
+        .args(["add", "openrouter", "--label", "OpenRouter key", "--stdin"])
+        .write_stdin("sk-or-v1-abcdef123456\n")
+        .assert()
+        .success();
+
+    // ls --json lists it
+    let out = te.envault().args(["ls", "--json"]).assert().success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    let rows: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(rows[0]["alias"], "openrouter");
+    assert_eq!(rows[0]["label"], "OpenRouter key");
+    assert!(rows[0].get("cipher").is_none(), "ls must not expose ciphers");
+
+    // the plaintext value exists nowhere on disk
+    let vault_raw = std::fs::read_to_string(te.home.path().join("vault.json")).unwrap();
+    assert!(!vault_raw.contains("sk-or-v1-abcdef123456"));
+    // and never in ls output
+    assert!(!stdout.contains("sk-or-v1-abcdef123456"));
+}
+
+#[test]
+fn add_rejects_bad_alias_and_duplicates() {
+    let te = TestEnv::new();
+    te.init();
+    te.envault()
+        .args(["add", "Bad_Alias", "--stdin"])
+        .write_stdin("value-123456\n")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("kebab-case"));
+
+    te.envault()
+        .args(["add", "dup", "--stdin"])
+        .write_stdin("value-123456\n")
+        .assert()
+        .success();
+    te.envault()
+        .args(["add", "dup", "--stdin"])
+        .write_stdin("value-123456\n")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("already exists"));
+}
+
+#[test]
 fn init_twice_fails() {
     let te = TestEnv::new();
     te.init();

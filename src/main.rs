@@ -16,6 +16,24 @@ struct Cli {
 enum Cmd {
     /// Create the vault and generate the keypair
     Init,
+    /// Add a secret (value via hidden prompt, or --stdin)
+    Add {
+        alias: String,
+        #[arg(long)]
+        label: Option<String>,
+        #[arg(long)]
+        url: Option<String>,
+        #[arg(long)]
+        notes: Option<String>,
+        /// Read the value from stdin (for piping); otherwise prompts on the TTY
+        #[arg(long)]
+        stdin: bool,
+    },
+    /// List secret names (never values)
+    Ls {
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 fn main() {
@@ -28,6 +46,10 @@ fn main() {
             Ok(())
         }
         Some(Cmd::Init) => commands::init::cmd_init(),
+        Some(Cmd::Add { alias, label, url, notes, stdin }) => {
+            commands::add::cmd_add(alias, label, url, notes, stdin)
+        }
+        Some(Cmd::Ls { json }) => commands::ls::cmd_ls(json),
     };
     if let Err(e) = result {
         eprintln!("error: {e:#}");
