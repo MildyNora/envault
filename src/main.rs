@@ -2,6 +2,7 @@ use clap::{Parser, Subcommand};
 
 mod commands;
 mod crypto;
+mod masker;
 mod paths;
 mod store;
 
