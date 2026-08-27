@@ -4,7 +4,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
 
-use super::app::{App, Mode, StatusKind, FIELD_NAMES};
+use super::app::{App, Keychain, Mode, StatusKind, COMMANDS, FIELD_NAMES};
 
 // Adaptive ANSI palette — resolves against the user's terminal theme.
 const ACCENT: Color = Color::Cyan;
@@ -55,20 +55,79 @@ pub fn draw(frame: &mut Frame, app: &App) {
     // Overlays paint on top.
     match &app.mode {
         Mode::Help => draw_help_overlay(frame, area),
+        Mode::Command(cl) => draw_command_palette(frame, outer[3], &cl.input, cl.sel),
         Mode::ConfirmDelete => draw_confirm_popup(
             frame,
             area,
-            &format!("Delete '{}'?", app.selected_alias().unwrap_or_default()),
-            "This removes the secret permanently.",
+            "Delete this secret?",
+            &format!(
+                "'{}' will be removed permanently. This cannot be undone.",
+                app.selected_alias().unwrap_or_default()
+            ),
         ),
         Mode::ConfirmRotate => draw_confirm_popup(
             frame,
             area,
             "Rotate the vault keypair?",
-            "Re-encrypts every secret and revokes Keychain grants.",
+            "Re-encrypts every secret to a fresh key and revokes every \
+             Keychain grant — macOS will ask you to Always Allow again.",
         ),
         _ => {}
     }
+}
+
+/// Command palette: a small list of `:` commands, filtered by what's typed,
+/// floating just above the command line, with the highlighted row marked.
+fn draw_command_palette(frame: &mut Frame, cmdline_area: Rect, input: &str, sel: usize) {
+    let matches = crate::tui::app::command_matches(input);
+    if matches.is_empty() {
+        return;
+    }
+    let rows = matches.len() as u16;
+    let height = rows + 2; // borders
+    let width: u16 = 60;
+    // sit directly above the command line
+    let y = cmdline_area.y.saturating_sub(height);
+    let x = cmdline_area.x;
+    let area = Rect {
+        x,
+        y,
+        width: width.min(cmdline_area.width),
+        height,
+    };
+    frame.render_widget(Clear, area);
+    let items: Vec<ListItem> = matches
+        .iter()
+        .enumerate()
+        .map(|(row, &idx)| {
+            let (name, desc) = COMMANDS[idx];
+            let selected = row == sel;
+            let marker = if selected { "▌" } else { " " };
+            let name_style = if selected {
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().add_modifier(Modifier::BOLD)
+            };
+            ListItem::new(Line::from(vec![
+                Span::styled(marker, Style::default().fg(ACCENT)),
+                Span::styled(format!(":{name:<8}"), name_style),
+                Span::styled(desc.to_string(), Style::default().fg(DIM)),
+            ]))
+        })
+        .collect();
+    frame.render_widget(
+        List::new(items).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(ACCENT))
+                .title(Span::styled(
+                    " commands ",
+                    Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+                )),
+        ),
+        area,
+    );
 }
 
 fn draw_banner(frame: &mut Frame, area: Rect, app: &App) {
@@ -145,7 +204,15 @@ fn draw_list(frame: &mut Frame, area: Rect, app: &App) {
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(border))
-            .title(title),
+            .title(title)
+            .title_bottom(Line::from(vec![
+                Span::styled(" ", Style::default()),
+                Span::styled(
+                    "a",
+                    Style::default().fg(KEYCAP).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" add ", Style::default().fg(DIM)),
+            ])),
     );
     frame.render_widget(list, area);
 }
@@ -173,7 +240,6 @@ fn draw_details(frame: &mut Frame, area: Rect, app: &App) {
                 }
                 let focused = form.focus == i;
                 let marker = if focused { "▌" } else { " " };
-                let locked = editing && i == NAME_IDX;
                 let shown = if i == VALUE_IDX {
                     "•".repeat(form.fields[i].len())
                 } else {
@@ -189,10 +255,30 @@ fn draw_details(frame: &mut Frame, area: Rect, app: &App) {
                     Span::styled(format!("{fname:<7}"), key_style),
                     Span::raw(shown),
                 ];
-                if locked {
-                    spans.push(Span::styled("  (locked)", Style::default().fg(DIM)));
+                if i == NAME_IDX {
+                    let tag = if editing {
+                        "  (locked — names can't change)"
+                    } else {
+                        "  (permanent)"
+                    };
+                    spans.push(Span::styled(tag, Style::default().fg(DIM)));
                 }
                 lines.push(Line::from(spans));
+            }
+            // "information session": explain the focused field.
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![
+                Span::styled("ℹ ", Style::default().fg(ACCENT)),
+                Span::styled(
+                    crate::tui::app::FIELD_HELP[form.focus],
+                    Style::default().fg(DIM),
+                ),
+            ]));
+            if form.focus == NAME_IDX && !editing {
+                lines.push(Line::styled(
+                    "  the name is locked once created — choose it carefully.",
+                    Style::default().fg(KEYCAP),
+                ));
             }
             (title, lines)
         }
@@ -338,12 +424,10 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
             spans.extend(hint("Esc", "cancel"));
         }
         Mode::Command(_) => {
+            spans.extend(hint("↑↓", "pick"));
+            spans.extend(hint("Tab", "complete"));
             spans.extend(hint("Enter", "run"));
             spans.extend(hint("Esc", "cancel"));
-            spans.push(Span::styled(
-                "rotate · help · quit",
-                Style::default().fg(DIM),
-            ));
         }
         _ => {
             spans.extend(hint("↑↓", "move"));
@@ -355,17 +439,28 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
             spans.extend(hint("?", "help"));
         }
     }
+    // key-guide on the left …
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    // … Keychain grant status on the right (always visible).
+    let (dot, label, color) = match app.keychain {
+        Keychain::Locked => ("●", "keychain: will prompt", ERR),
+        Keychain::UnlockedThisSession => ("●", "keychain: unlocked (session)", OK),
+    };
+    let badge = Line::from(vec![
+        Span::styled(dot, Style::default().fg(color)),
+        Span::styled(format!(" {label} "), Style::default().fg(DIM)),
+    ]);
+    frame.render_widget(Paragraph::new(badge).alignment(Alignment::Right), area);
 }
 
 fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
-    if let Mode::Command(input) = &app.mode {
+    if let Mode::Command(cl) = &app.mode {
         let line = Line::from(vec![
             Span::styled(
                 ":",
                 Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
             ),
-            Span::raw(input.clone()),
+            Span::raw(cl.input.clone()),
             Span::styled("_", Style::default().fg(ACCENT)),
         ]);
         frame.render_widget(Paragraph::new(line), area);
@@ -392,7 +487,8 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_confirm_popup(frame: &mut Frame, area: Rect, title: &str, body: &str) {
-    let popup = centered_rect(area, 52, 7);
+    // Wide enough for the body, and text wraps so nothing is ever clipped.
+    let popup = centered_rect(area, 62, 9);
     frame.render_widget(Clear, popup);
     let lines = vec![
         Line::from(""),
@@ -401,13 +497,13 @@ fn draw_confirm_popup(frame: &mut Frame, area: Rect, title: &str, body: &str) {
         Line::from(vec![
             Span::raw("  "),
             Span::styled("y", Style::default().fg(OK).add_modifier(Modifier::BOLD)),
-            Span::styled(" yes    ", Style::default().fg(DIM)),
+            Span::styled(" yes     ", Style::default().fg(DIM)),
             Span::styled("n", Style::default().fg(ERR).add_modifier(Modifier::BOLD)),
-            Span::styled(" / any key  no", Style::default().fg(DIM)),
+            Span::styled(" / any other key  no", Style::default().fg(DIM)),
         ]),
     ];
     frame.render_widget(
-        Paragraph::new(lines).block(
+        Paragraph::new(lines).wrap(Wrap { trim: true }).block(
             Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
@@ -422,7 +518,7 @@ fn draw_confirm_popup(frame: &mut Frame, area: Rect, title: &str, body: &str) {
 }
 
 fn draw_help_overlay(frame: &mut Frame, area: Rect) {
-    let popup = centered_rect(area, 60, 18);
+    let popup = centered_rect(area, 66, 24);
     frame.render_widget(Clear, popup);
     let key = |k: &str, d: &str| {
         Line::from(vec![
@@ -433,29 +529,47 @@ fn draw_help_overlay(frame: &mut Frame, area: Rect) {
             Span::styled(d.to_string(), Style::default().fg(DIM)),
         ])
     };
-    let lines = vec![
+    let head = |t: &str| {
         Line::styled(
-            "  Keys",
+            format!("  {t}"),
             Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-        ),
+        )
+    };
+    let lines = vec![
+        head("Keys"),
         key("↑ / ↓ j k", "move selection"),
         key("1-9", "jump to secret"),
         key("/", "search"),
         key("a / e / d", "add · edit · delete"),
         key("r / c", "reveal · copy (clears in 15s)"),
         Line::from(""),
-        Line::styled(
-            "  Commands  (:)",
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-        ),
+        head("Commands  (: opens a searchable palette)"),
         key(":rotate", "re-key the vault (revokes Keychain grants)"),
         key(":help", "this screen"),
         key(":quit", "exit"),
         Line::from(""),
+        head("What agents can see"),
         Line::styled(
-            "  Agents see names only — never your values.",
+            "  Protected: values never enter an agent's context, files, or",
             Style::default().fg(OK),
         ),
+        Line::styled(
+            "  logs. Agents get names + ciphers only; run output is masked.",
+            Style::default().fg(OK),
+        ),
+        Line::styled(
+            "  Bypassed: a process YOU launch via `envault run` holds the",
+            Style::default().fg(ERR),
+        ),
+        Line::styled(
+            "  real value and could leak it over the network or to a file;",
+            Style::default().fg(ERR),
+        ),
+        Line::styled(
+            "  masking only covers its stdout. :rotate revokes old trust.",
+            Style::default().fg(ERR),
+        ),
+        Line::from(""),
         Line::styled("  Press any key to close.", Style::default().fg(DIM)),
     ];
     frame.render_widget(
@@ -465,7 +579,7 @@ fn draw_help_overlay(frame: &mut Frame, area: Rect) {
                 .border_type(BorderType::Rounded)
                 .border_style(Style::default().fg(ACCENT))
                 .title(Span::styled(
-                    " help ",
+                    " help & security ",
                     Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
                 )),
         ),
@@ -620,7 +734,7 @@ mod tests {
     }
 
     #[test]
-    fn help_overlay_lists_keys_and_commands() {
+    fn help_overlay_lists_keys_commands_and_bypass() {
         let mut app = test_app();
         app.mode = Mode::Help;
         let text = render(&app);
@@ -630,14 +744,73 @@ mod tests {
             text.contains("never") || text.contains("aliases"),
             "agent explainer present: {text}"
         );
+        // the honest "what's bypassed" boundary must be surfaced
+        assert!(text.contains("Bypassed"), "bypass section: {text}");
+        assert!(
+            text.contains("network") || text.contains("leak"),
+            "bypass explains exfiltration: {text}"
+        );
     }
 
     #[test]
-    fn command_line_shows_prompt() {
+    fn command_palette_lists_commands_with_descriptions() {
+        use crate::tui::app::CommandLine;
         let mut app = test_app();
-        app.mode = Mode::Command("rot".into());
+        app.mode = Mode::Command(CommandLine {
+            input: "r".into(),
+            sel: 0,
+        });
         let text = render(&app);
-        assert!(text.contains(":rot"), "command prompt shown: {text}");
+        assert!(text.contains(":r"), "command prompt shown: {text}");
+        assert!(text.contains("rotate"), "palette lists rotate: {text}");
+        assert!(
+            text.contains("revokes"),
+            "palette shows description: {text}"
+        );
+    }
+
+    #[test]
+    fn keychain_badge_reflects_state() {
+        let locked = render(&test_app());
+        assert!(locked.contains("will prompt"), "locked badge: {locked}");
+        let mut app = test_app();
+        app.mark_keychain_unlocked();
+        let unlocked = render(&app);
+        assert!(unlocked.contains("unlocked"), "unlocked badge: {unlocked}");
+    }
+
+    #[test]
+    fn add_form_explains_name_is_locked() {
+        let mut app = test_app();
+        app.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('a'),
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        let text = render(&app);
+        // focus starts on name → its help line warns about permanence
+        assert!(
+            text.contains("locked once created") || text.contains("cannot be renamed"),
+            "name-locked notice: {text}"
+        );
+    }
+
+    #[test]
+    fn list_shows_add_affordance() {
+        let text = render(&test_app());
+        assert!(text.contains("a add"), "list must hint the add key: {text}");
+    }
+
+    #[test]
+    fn rotate_popup_text_not_truncated() {
+        let mut app = test_app();
+        app.mode = Mode::ConfirmRotate;
+        let text = render(&app);
+        // the full sentence must appear un-clipped (wrapping allowed)
+        assert!(text.contains("Re-encrypts"), "{text}");
+        assert!(
+            text.contains("revokes") && text.contains("Keychain"),
+            "rotate body must show completely: {text}"
+        );
     }
 
     #[test]
