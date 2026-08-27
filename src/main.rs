@@ -66,12 +66,7 @@ enum Cmd {
 fn main() {
     let cli = Cli::parse();
     let result = match cli.cmd {
-        None => {
-            // Bare `envault` opens the TUI in Milestone 3; until then, show help.
-            use clap::CommandFactory;
-            Cli::command().print_help().ok();
-            Ok(())
-        }
+        None => tui::run_tui(),
         Some(Cmd::Init) => commands::init::cmd_init(),
         Some(Cmd::Add {
             alias,

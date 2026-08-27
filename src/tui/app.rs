@@ -221,7 +221,11 @@ impl App {
             KeyCode::Enter => return self.submit_form(form, editing),
             _ => {}
         }
-        self.mode = if editing { Mode::Edit(form) } else { Mode::Add(form) };
+        self.mode = if editing {
+            Mode::Edit(form)
+        } else {
+            Mode::Add(form)
+        };
         None
     }
 
@@ -242,7 +246,11 @@ impl App {
                 }
             };
             if let Some(entry) = self.vault.secrets.iter_mut().find(|s| s.alias == target) {
-                entry.label = if label.is_empty() { target.clone() } else { label };
+                entry.label = if label.is_empty() {
+                    target.clone()
+                } else {
+                    label
+                };
                 entry.url = if url.is_empty() { None } else { Some(url) };
                 entry.notes = notes;
                 if let Some(c) = cipher {
@@ -281,7 +289,11 @@ impl App {
         let now = now_rfc3339();
         self.vault
             .insert(SecretEntry {
-                label: if label.is_empty() { alias.clone() } else { label },
+                label: if label.is_empty() {
+                    alias.clone()
+                } else {
+                    label
+                },
                 alias: alias.clone(),
                 cipher,
                 url: if url.is_empty() { None } else { Some(url) },
@@ -363,7 +375,10 @@ mod tests {
     #[test]
     fn quit_reveal_copy_effects() {
         let (mut app, _) = app_with(&["a-key"]);
-        assert!(matches!(app.handle_key(ch('r')), Some(Effect::Decrypt { .. })));
+        assert!(matches!(
+            app.handle_key(ch('r')),
+            Some(Effect::Decrypt { .. })
+        ));
         app.provide_plaintext("old-value-123".into());
         assert!(matches!(app.mode, Mode::Reveal(ref v) if v == "old-value-123"));
         app.handle_key(key(KeyCode::Esc)); // any key leaves reveal

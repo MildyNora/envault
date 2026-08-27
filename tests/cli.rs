@@ -290,6 +290,16 @@ fn guard_check_blocks_vault_reads_and_allows_normal() {
 }
 
 #[test]
+fn bare_envault_without_tty_refuses_with_hint() {
+    let te = TestEnv::new();
+    te.init();
+    te.envault()
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("terminal"));
+}
+
+#[test]
 fn init_twice_fails() {
     let te = TestEnv::new();
     te.init();
