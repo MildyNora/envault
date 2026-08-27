@@ -45,15 +45,6 @@ pub struct CommandLine {
     pub sel: usize,
 }
 
-/// Whether the private key has been unlocked from the Keychain yet this
-/// session. macOS gives no way to read the "Always Allow" ACL without
-/// triggering the prompt, so this reflects observed access, not the ACL.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Keychain {
-    Locked,
-    UnlockedThisSession,
-}
-
 #[derive(Debug, Clone)]
 pub struct Form {
     pub fields: [String; 5],
@@ -98,7 +89,6 @@ pub struct App {
     pub mode: Mode,
     pub status: String,
     pub status_kind: StatusKind,
-    pub keychain: Keychain,
 }
 
 impl App {
@@ -111,14 +101,7 @@ impl App {
             mode: Mode::List,
             status: String::new(),
             status_kind: StatusKind::Info,
-            keychain: Keychain::Locked,
         }
-    }
-
-    /// Record that the Keychain just yielded the private key (a reveal, copy,
-    /// or rotation succeeded without us being able to see a prompt).
-    pub fn mark_keychain_unlocked(&mut self) {
-        self.keychain = Keychain::UnlockedThisSession;
     }
 
     pub fn set_info(&mut self, msg: impl Into<String>) {
@@ -162,16 +145,13 @@ impl App {
     }
 
     pub fn provide_plaintext(&mut self, value: String) {
-        self.mark_keychain_unlocked();
         self.mode = Mode::Reveal(value);
     }
 
-    /// Runtime callback after a successful `Effect::Rotate`. Rotation mints a
-    /// fresh Keychain item, so trust resets to Locked until the next access.
+    /// Runtime callback after a successful `Effect::Rotate`.
     pub fn after_rotate(&mut self, count: usize, vault: Vault, recipient: age::x25519::Recipient) {
         self.vault = vault;
         self.recipient = recipient;
-        self.keychain = Keychain::Locked;
         self.clamp_selection();
         self.set_success(format!(
             "rotated {count} secret(s) · re-grant Always Allow on next use"
@@ -231,7 +211,7 @@ impl App {
     fn on_list_key(&mut self, key: KeyEvent) -> Option<Effect> {
         self.mode = Mode::List;
         match key.code {
-            KeyCode::Char('q') => return Some(Effect::Quit),
+            KeyCode::Char('q') | KeyCode::Esc => return Some(Effect::Quit),
             KeyCode::Char('j') | KeyCode::Down => {
                 // stop on the add row (index == len), never past it
                 if self.selected < self.add_row_index() {
@@ -593,6 +573,15 @@ mod tests {
     }
 
     #[test]
+    fn esc_quits_from_list_like_q() {
+        let (mut app, _) = app_with(&["a-key"]);
+        assert!(matches!(
+            app.handle_key(key(KeyCode::Esc)),
+            Some(Effect::Quit)
+        ));
+    }
+
+    #[test]
     fn quit_reveal_copy_effects() {
         let (mut app, _) = app_with(&["a-key"]);
         assert!(matches!(
@@ -780,24 +769,6 @@ mod tests {
             panic!("expected command mode")
         };
         assert_eq!(cl.input, "quit");
-    }
-
-    #[test]
-    fn keychain_starts_locked_and_unlocks_on_reveal() {
-        let (mut app, _) = app_with(&["a-key"]);
-        assert_eq!(app.keychain, Keychain::Locked);
-        app.handle_key(ch('r')); // requests decrypt
-        app.provide_plaintext("plain".into()); // runtime supplies value
-        assert_eq!(app.keychain, Keychain::UnlockedThisSession);
-    }
-
-    #[test]
-    fn keychain_relocks_after_rotate() {
-        let (mut app, _) = app_with(&["a-key"]);
-        app.mark_keychain_unlocked();
-        assert_eq!(app.keychain, Keychain::UnlockedThisSession);
-        app.after_rotate(1, Vault::default(), generate_identity().to_public());
-        assert_eq!(app.keychain, Keychain::Locked);
     }
 
     #[test]
