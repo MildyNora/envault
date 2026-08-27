@@ -6,6 +6,7 @@ mod manifest;
 mod masker;
 mod paths;
 mod store;
+mod tui;
 
 #[derive(Parser)]
 #[command(
