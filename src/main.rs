@@ -38,6 +38,8 @@ enum Cmd {
     },
     /// Map a project env var to a vault alias in envault.toml
     Link { env_var: String, alias: String },
+    /// Encrypt every entry of a dotenv file into the vault and link it
+    Import { file: std::path::PathBuf },
     /// Run a command with secrets injected and masked out of its output
     Run {
         #[arg(long)]
@@ -68,6 +70,7 @@ fn main() {
         }
         Some(Cmd::Ls { json }) => commands::ls::cmd_ls(json),
         Some(Cmd::Link { env_var, alias }) => commands::link::cmd_link(env_var, alias),
+        Some(Cmd::Import { file }) => commands::import::cmd_import(file),
         Some(Cmd::Run { manifest, env, allow_missing, command }) => {
             match commands::run::cmd_run(commands::run::RunArgs {
                 manifest,

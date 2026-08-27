@@ -199,6 +199,48 @@ fn run_extra_env_flag_maps_alias() {
 }
 
 #[test]
+fn import_dotenv_encrypts_links_and_reports() {
+    let te = TestEnv::new();
+    te.init();
+    let env_file = te.project.path().join(".env");
+    std::fs::write(
+        &env_file,
+        "OPENROUTER_API_KEY=sk-or-import-1\nDB_PASSWORD=hunter22222\n",
+    )
+    .unwrap();
+
+    te.envault()
+        .args(["import", ".env"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Imported 2"))
+        .stdout(predicates::str::contains("rm .env"));
+
+    // aliases created (kebab-case of var names)
+    let out = te.envault().args(["ls", "--json"]).assert().success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(stdout.contains("openrouter-api-key"));
+    assert!(stdout.contains("db-password"));
+
+    // manifest linked
+    let manifest = std::fs::read_to_string(te.project.path().join("envault.toml")).unwrap();
+    assert!(manifest.contains("OPENROUTER_API_KEY = \"openrouter-api-key\""));
+    assert!(manifest.contains("DB_PASSWORD = \"db-password\""));
+
+    // plaintext not in the vault; original file untouched (user deletes it)
+    let vault_raw = std::fs::read_to_string(te.home.path().join("vault.json")).unwrap();
+    assert!(!vault_raw.contains("sk-or-import-1"));
+    assert!(env_file.exists());
+
+    // second import skips existing aliases instead of failing
+    te.envault()
+        .args(["import", ".env"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("skipped 2"));
+}
+
+#[test]
 fn init_twice_fails() {
     let te = TestEnv::new();
     te.init();
