@@ -133,6 +133,72 @@ fn link_writes_manifest_and_validates_alias() {
 }
 
 #[test]
+fn run_injects_and_masks_output() {
+    let te = TestEnv::new();
+    te.init();
+    te.envault()
+        .args(["add", "my-key", "--stdin"])
+        .write_stdin("supersecret-value-9\n")
+        .assert()
+        .success();
+    te.envault().args(["link", "MY_KEY", "my-key"]).assert().success();
+
+    let out = te
+        .envault()
+        .args(["run", "--", "sh", "-c", "echo got: $MY_KEY"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(stdout.contains("got: [envault:my-key]"), "stdout was: {stdout}");
+    assert!(!stdout.contains("supersecret-value-9"));
+}
+
+#[test]
+fn run_passes_exit_code_through() {
+    let te = TestEnv::new();
+    te.init();
+    te.envault()
+        .args(["run", "--allow-missing", "--", "sh", "-c", "exit 3"])
+        .assert()
+        .code(3);
+}
+
+#[test]
+fn run_fails_listing_all_missing_aliases() {
+    let te = TestEnv::new();
+    te.init();
+    std::fs::write(
+        te.project.path().join("envault.toml"),
+        "A_KEY = \"nope-a\"\nB_KEY = \"nope-b\"\n",
+    )
+    .unwrap();
+    te.envault()
+        .args(["run", "--", "true"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("nope-a"))
+        .stderr(predicates::str::contains("nope-b"));
+}
+
+#[test]
+fn run_extra_env_flag_maps_alias() {
+    let te = TestEnv::new();
+    te.init();
+    te.envault()
+        .args(["add", "extra", "--stdin"])
+        .write_stdin("extra-value-123\n")
+        .assert()
+        .success();
+    let out = te
+        .envault()
+        .args(["run", "--env", "EXTRA=extra", "--", "sh", "-c", "echo e=$EXTRA"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(stdout.contains("e=[envault:extra]"), "stdout was: {stdout}");
+}
+
+#[test]
 fn init_twice_fails() {
     let te = TestEnv::new();
     te.init();

@@ -38,6 +38,19 @@ enum Cmd {
     },
     /// Map a project env var to a vault alias in envault.toml
     Link { env_var: String, alias: String },
+    /// Run a command with secrets injected and masked out of its output
+    Run {
+        #[arg(long)]
+        manifest: Option<std::path::PathBuf>,
+        /// Extra VAR=alias mappings (repeatable)
+        #[arg(long)]
+        env: Vec<String>,
+        #[arg(long)]
+        allow_missing: bool,
+        /// Everything after `--` is the command to run
+        #[arg(last = true)]
+        command: Vec<String>,
+    },
 }
 
 fn main() {
@@ -55,6 +68,17 @@ fn main() {
         }
         Some(Cmd::Ls { json }) => commands::ls::cmd_ls(json),
         Some(Cmd::Link { env_var, alias }) => commands::link::cmd_link(env_var, alias),
+        Some(Cmd::Run { manifest, env, allow_missing, command }) => {
+            match commands::run::cmd_run(commands::run::RunArgs {
+                manifest,
+                env,
+                allow_missing,
+                command,
+            }) {
+                Ok(code) => std::process::exit(code),
+                Err(e) => Err(e),
+            }
+        }
     };
     if let Err(e) = result {
         eprintln!("error: {e:#}");
