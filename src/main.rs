@@ -1,5 +1,6 @@
 use clap::{Parser, Subcommand};
 
+mod cdp;
 mod commands;
 mod crypto;
 mod manifest;
