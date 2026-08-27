@@ -11,6 +11,49 @@ const LABEL: usize = 2;
 const URL: usize = 3;
 const NOTES: usize = 4;
 
+/// One-line "what is this field" help, shown under the form as you move focus.
+pub const FIELD_HELP: [&str; 5] = [
+    "permanent identifier agents use — locked once created, cannot be renamed",
+    "the secret itself — encrypted at rest, never shown to agents",
+    "optional human label shown in the dashboard",
+    "optional — restricts `envault fill` to this page host (anti-phishing)",
+    "optional free-text notes",
+];
+
+/// Typable `:` commands: (name, description). Also drives the palette list.
+pub const COMMANDS: [(&str, &str); 3] = [
+    ("rotate", "re-key the vault · revokes Keychain grants"),
+    ("help", "keys, commands & the security boundary"),
+    ("quit", "exit the dashboard"),
+];
+
+/// Indices into COMMANDS whose name starts with `input` (empty input = all).
+pub fn command_matches(input: &str) -> Vec<usize> {
+    let q = input.trim().to_lowercase();
+    COMMANDS
+        .iter()
+        .enumerate()
+        .filter(|(_, (name, _))| q.is_empty() || name.starts_with(&q))
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// The `:` command line plus which palette row is highlighted.
+#[derive(Debug, Clone, Default)]
+pub struct CommandLine {
+    pub input: String,
+    pub sel: usize,
+}
+
+/// Whether the private key has been unlocked from the Keychain yet this
+/// session. macOS gives no way to read the "Always Allow" ACL without
+/// triggering the prompt, so this reflects observed access, not the ACL.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Keychain {
+    Locked,
+    UnlockedThisSession,
+}
+
 #[derive(Debug, Clone)]
 pub struct Form {
     pub fields: [String; 5],
@@ -27,7 +70,7 @@ pub enum Mode {
     ConfirmDelete,
     ConfirmRotate,
     Reveal(String),
-    Command(String),
+    Command(CommandLine),
     Help,
 }
 
@@ -55,6 +98,7 @@ pub struct App {
     pub mode: Mode,
     pub status: String,
     pub status_kind: StatusKind,
+    pub keychain: Keychain,
 }
 
 impl App {
@@ -67,7 +111,14 @@ impl App {
             mode: Mode::List,
             status: String::new(),
             status_kind: StatusKind::Info,
+            keychain: Keychain::Locked,
         }
+    }
+
+    /// Record that the Keychain just yielded the private key (a reveal, copy,
+    /// or rotation succeeded without us being able to see a prompt).
+    pub fn mark_keychain_unlocked(&mut self) {
+        self.keychain = Keychain::UnlockedThisSession;
     }
 
     pub fn set_info(&mut self, msg: impl Into<String>) {
@@ -112,16 +163,19 @@ impl App {
     }
 
     pub fn provide_plaintext(&mut self, value: String) {
+        self.mark_keychain_unlocked();
         self.mode = Mode::Reveal(value);
     }
 
-    /// Runtime callback after a successful `Effect::Rotate`.
+    /// Runtime callback after a successful `Effect::Rotate`. Rotation mints a
+    /// fresh Keychain item, so trust resets to Locked until the next access.
     pub fn after_rotate(&mut self, count: usize, vault: Vault, recipient: age::x25519::Recipient) {
         self.vault = vault;
         self.recipient = recipient;
+        self.keychain = Keychain::Locked;
         self.clamp_selection();
         self.set_success(format!(
-            "rotated {count} secret(s) to a new keypair — Keychain will re-ask authorization"
+            "rotated {count} secret(s) · re-grant Always Allow on next use"
         ));
     }
 
@@ -162,7 +216,7 @@ impl App {
                 self.mode = Mode::Help;
             }
             KeyCode::Char(':') => {
-                self.mode = Mode::Command(String::new());
+                self.mode = Mode::Command(CommandLine::default());
             }
             KeyCode::Char('a') => {
                 self.mode = Mode::Add(Form {
@@ -260,27 +314,61 @@ impl App {
         None
     }
 
-    fn on_command_key(&mut self, key: KeyEvent, mut input: String) -> Option<Effect> {
+    fn on_command_key(&mut self, key: KeyEvent, mut cl: CommandLine) -> Option<Effect> {
+        let matches = command_matches(&cl.input);
         match key.code {
             KeyCode::Esc => {
                 self.mode = Mode::List;
             }
+            KeyCode::Up => {
+                cl.sel = cl.sel.saturating_sub(1);
+                self.mode = Mode::Command(cl);
+            }
+            KeyCode::Down => {
+                if !matches.is_empty() {
+                    cl.sel = (cl.sel + 1).min(matches.len() - 1);
+                }
+                self.mode = Mode::Command(cl);
+            }
+            KeyCode::Tab => {
+                // autocomplete the input to the highlighted command
+                if let Some(&idx) = matches.get(cl.sel) {
+                    cl.input = COMMANDS[idx].0.to_string();
+                    cl.sel = 0;
+                }
+                self.mode = Mode::Command(cl);
+            }
             KeyCode::Enter => {
                 self.mode = Mode::List;
-                return self.run_command(input.trim());
+                // exact typed match wins; otherwise run the highlighted row
+                let typed = cl.input.trim().to_lowercase();
+                let target = if COMMANDS.iter().any(|(n, _)| *n == typed) {
+                    Some(typed)
+                } else {
+                    matches.get(cl.sel).map(|&idx| COMMANDS[idx].0.to_string())
+                };
+                return match target {
+                    Some(cmd) => self.run_command(&cmd),
+                    None => {
+                        self.set_error(format!("unknown command: {}", cl.input.trim()));
+                        None
+                    }
+                };
             }
             KeyCode::Backspace => {
-                if input.pop().is_none() {
+                if cl.input.pop().is_none() {
                     self.mode = Mode::List; // backspace on empty exits
                 } else {
-                    self.mode = Mode::Command(input);
+                    cl.sel = 0;
+                    self.mode = Mode::Command(cl);
                 }
             }
             KeyCode::Char(c) => {
-                input.push(c);
-                self.mode = Mode::Command(input);
+                cl.input.push(c);
+                cl.sel = 0;
+                self.mode = Mode::Command(cl);
             }
-            _ => self.mode = Mode::Command(input),
+            _ => self.mode = Mode::Command(cl),
         }
         None
     }
@@ -594,6 +682,65 @@ mod tests {
         app.handle_key(key(KeyCode::Enter));
         assert!(app.handle_key(ch('n')).is_none());
         assert!(matches!(app.mode, Mode::List));
+    }
+
+    #[test]
+    fn command_palette_filters_and_arrows_select() {
+        let (mut app, _) = app_with(&[]);
+        app.handle_key(ch(':'));
+        type_str(&mut app, "h"); // matches only "help"
+        let matches = command_matches("h");
+        assert_eq!(matches, vec![1]);
+        // Enter with a single match runs it (help)
+        assert!(app.handle_key(key(KeyCode::Enter)).is_none());
+        assert!(matches!(app.mode, Mode::Help));
+    }
+
+    #[test]
+    fn command_palette_enter_runs_highlighted_on_empty_input() {
+        let (mut app, _) = app_with(&[]);
+        app.handle_key(ch(':')); // empty input, sel 0 = rotate
+        assert!(app.handle_key(key(KeyCode::Enter)).is_none());
+        assert!(matches!(app.mode, Mode::ConfirmRotate));
+    }
+
+    #[test]
+    fn command_palette_down_then_enter_picks_second() {
+        let (mut app, _) = app_with(&[]);
+        app.handle_key(ch(':'));
+        app.handle_key(key(KeyCode::Down)); // sel 1 = help
+        assert!(app.handle_key(key(KeyCode::Enter)).is_none());
+        assert!(matches!(app.mode, Mode::Help));
+    }
+
+    #[test]
+    fn command_tab_autocompletes_highlighted() {
+        let (mut app, _) = app_with(&[]);
+        app.handle_key(ch(':'));
+        type_str(&mut app, "q");
+        app.handle_key(key(KeyCode::Tab));
+        let Mode::Command(cl) = &app.mode else {
+            panic!("expected command mode")
+        };
+        assert_eq!(cl.input, "quit");
+    }
+
+    #[test]
+    fn keychain_starts_locked_and_unlocks_on_reveal() {
+        let (mut app, _) = app_with(&["a-key"]);
+        assert_eq!(app.keychain, Keychain::Locked);
+        app.handle_key(ch('r')); // requests decrypt
+        app.provide_plaintext("plain".into()); // runtime supplies value
+        assert_eq!(app.keychain, Keychain::UnlockedThisSession);
+    }
+
+    #[test]
+    fn keychain_relocks_after_rotate() {
+        let (mut app, _) = app_with(&["a-key"]);
+        app.mark_keychain_unlocked();
+        assert_eq!(app.keychain, Keychain::UnlockedThisSession);
+        app.after_rotate(1, Vault::default(), generate_identity().to_public());
+        assert_eq!(app.keychain, Keychain::Locked);
     }
 
     #[test]
