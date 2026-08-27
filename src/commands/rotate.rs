@@ -1,13 +1,20 @@
 use anyhow::{Context, Result};
 use std::fs;
+use std::path::Path;
 
 use crate::crypto;
 use crate::paths;
 use crate::store::Vault;
 
-pub fn cmd_rotate() -> Result<()> {
-    let home = paths::envault_home();
-    let mut vault = Vault::load(&home)?;
+pub struct RotateOutcome {
+    pub count: usize,
+    pub recipient: age::x25519::Recipient,
+}
+
+/// Re-encrypt every secret to a brand-new keypair. Shared by the CLI command
+/// and the TUI's `:rotate`.
+pub fn rotate_in_place(home: &Path) -> Result<RotateOutcome> {
+    let mut vault = Vault::load(home)?;
     let old_identity = crypto::load_identity()?;
 
     // Decrypt everything up front: any failure aborts before any state changes.
@@ -35,12 +42,20 @@ pub fn cmd_rotate() -> Result<()> {
     // Delete-then-create gives the new Keychain item a fresh ACL, so macOS
     // asks for authorization again: rotation revokes every prior grant.
     crypto::delete_identity()?;
-    crypto::store_identity(&new_identity, &home)?;
-    fs::rename(&staged, paths::vault_file(&home)).context("activating the rotated vault")?;
-    crypto::store_recipient(&new_identity, &home)?;
+    crypto::store_identity(&new_identity, home)?;
+    fs::rename(&staged, paths::vault_file(home)).context("activating the rotated vault")?;
+    crypto::store_recipient(&new_identity, home)?;
 
-    println!("Rotated {} secret(s) to a new keypair", values.len());
-    println!("  new public key: {new_recipient}");
+    Ok(RotateOutcome {
+        count: values.len(),
+        recipient: new_recipient,
+    })
+}
+
+pub fn cmd_rotate() -> Result<()> {
+    let outcome = rotate_in_place(&paths::envault_home())?;
+    println!("Rotated {} secret(s) to a new keypair", outcome.count);
+    println!("  new public key: {}", outcome.recipient);
     println!(
         "\nmacOS will ask for Keychain authorization again on next use — intentional:\n\
          rotation revokes every previously granted 'Always Allow'."
