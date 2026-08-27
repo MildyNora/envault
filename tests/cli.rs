@@ -109,6 +109,30 @@ fn add_rejects_bad_alias_and_duplicates() {
 }
 
 #[test]
+fn link_writes_manifest_and_validates_alias() {
+    let te = TestEnv::new();
+    te.init();
+    te.envault()
+        .args(["add", "openrouter", "--stdin"])
+        .write_stdin("sk-or-value-1\n")
+        .assert()
+        .success();
+
+    te.envault()
+        .args(["link", "OPENROUTER_API_KEY", "openrouter"])
+        .assert()
+        .success();
+    let manifest = std::fs::read_to_string(te.project.path().join("envault.toml")).unwrap();
+    assert!(manifest.contains("OPENROUTER_API_KEY = \"openrouter\""));
+
+    te.envault()
+        .args(["link", "X_KEY", "does-not-exist"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("envault add"));
+}
+
+#[test]
 fn init_twice_fails() {
     let te = TestEnv::new();
     te.init();

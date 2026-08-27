@@ -2,6 +2,7 @@ use clap::{Parser, Subcommand};
 
 mod commands;
 mod crypto;
+mod manifest;
 mod masker;
 mod paths;
 mod store;
@@ -35,6 +36,8 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Map a project env var to a vault alias in envault.toml
+    Link { env_var: String, alias: String },
 }
 
 fn main() {
@@ -51,6 +54,7 @@ fn main() {
             commands::add::cmd_add(alias, label, url, notes, stdin)
         }
         Some(Cmd::Ls { json }) => commands::ls::cmd_ls(json),
+        Some(Cmd::Link { env_var, alias }) => commands::link::cmd_link(env_var, alias),
     };
     if let Err(e) = result {
         eprintln!("error: {e:#}");
