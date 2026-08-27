@@ -1,5 +1,6 @@
 use clap::Parser;
 
+mod crypto;
 mod paths;
 mod store;
 
