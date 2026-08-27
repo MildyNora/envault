@@ -59,6 +59,22 @@ enum Cmd {
     GuardCheck,
     /// Encrypt every entry of a dotenv file into the vault and link it
     Import { file: std::path::PathBuf },
+    /// Ask the user (in a pop-up window) to add a secret you don't have yet
+    Request {
+        /// The name the secret will be stored under (agent-chosen)
+        name: String,
+        #[arg(long)]
+        label: Option<String>,
+        /// Why you need it — shown to the user so they can decide
+        #[arg(long)]
+        reason: Option<String>,
+        /// Identify yourself, e.g. --agent "Claude Code"
+        #[arg(long)]
+        agent: Option<String>,
+    },
+    /// Internal: the human-facing request window (spawned in a new terminal)
+    #[command(hide = true)]
+    RequestWindow { session: std::path::PathBuf },
     /// Re-encrypt the vault to a brand-new keypair (revokes Keychain grants)
     Rotate,
     /// Run a command with secrets injected and masked out of its output
@@ -100,6 +116,16 @@ fn main() {
             Err(e) => Err(e),
         },
         Some(Cmd::Import { file }) => commands::import::cmd_import(file),
+        Some(Cmd::Request {
+            name,
+            label,
+            reason,
+            agent,
+        }) => match commands::request::cmd_request(name, label, reason, agent) {
+            Ok(code) => std::process::exit(code),
+            Err(e) => Err(e),
+        },
+        Some(Cmd::RequestWindow { session }) => commands::request::cmd_request_window(session),
         Some(Cmd::Rotate) => commands::rotate::cmd_rotate(),
         Some(Cmd::Run {
             manifest,
