@@ -1,6 +1,6 @@
 [package]
 name = "envault"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 description = "Local secrets vault for agentic coding: agents see aliases and ciphers, never plaintext"
 license = "MIT"
@@ -17,9 +17,11 @@ dirs = "5"
 dotenvy = "0.15"
 portable-pty = "0.8"
 ratatui = "0.29"
+robius-authentication = "0.3.1"
 rpassword = "7"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 toml = "0.8"
 tungstenite = "0.24"
 ureq = { version = "2", features = ["json"] }

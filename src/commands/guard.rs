@@ -59,6 +59,20 @@ pub fn guard_decision(
                             .to_string(),
                     );
                 }
+                if seg == "envault audit" || seg.starts_with("envault audit ") {
+                    return Some(
+                        "envault guard: the audit log is human-only. Ask the user to \
+                         run `envault audit` in their own terminal."
+                            .to_string(),
+                    );
+                }
+                if seg.starts_with("envault config set") {
+                    return Some(
+                        "envault guard: changing envault settings is human-only. Ask \
+                         the user to run `envault config set …` themselves."
+                            .to_string(),
+                    );
+                }
             }
         }
     }
@@ -133,6 +147,19 @@ mod tests {
             assert!(verdict.is_some(), "{cmd} should block");
             assert!(verdict.unwrap().contains("human-only"), "{cmd}");
         }
+    }
+
+    #[test]
+    fn blocks_audit_and_config_set_but_allows_config_show() {
+        assert!(guard_decision("Bash", &json!({"command": "envault audit"}), HOME).is_some());
+        assert!(guard_decision(
+            "Bash",
+            &json!({"command": "envault config set audit-log off"}),
+            HOME
+        )
+        .is_some());
+        // reading settings is harmless — allowed
+        assert!(guard_decision("Bash", &json!({"command": "envault config"}), HOME).is_none());
     }
 
     #[test]

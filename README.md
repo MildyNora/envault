@@ -31,6 +31,14 @@ window on Windows, and a terminal emulator on Linux.
   field — password inputs render masked, plain text fields don't.
 - The `envault` dashboard **live-updates**: if a secret is added while it's
   open (e.g. a granted `envault request`), it reloads within ~500ms.
+- `envault config set audit-log on` — record every decryption (time, name,
+  action, calling command) to a small, hash-chained, tamper-evident log.
+  View it with `envault audit`. Both are human-only and gated behind a
+  system (Touch ID / password) prompt, so an agent can neither read the log
+  nor silently disable it.
+- `envault config set touch-id on` — require a Touch ID / Windows Hello /
+  password prompt before every decryption. Opt-in; off by default for
+  smoothness. (macOS/Windows; not available on Linux yet.)
 
 ## Agent integration (Claude Code plugin)
 

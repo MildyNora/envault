@@ -101,11 +101,11 @@ fn event_loop(app: &mut App, home: &std::path::Path) -> Result<()> {
                     app.set_error(format!("save failed: {e:#}"));
                 }
             }
-            Some(Effect::Decrypt { alias }) => match decrypt(app, &alias) {
+            Some(Effect::Decrypt { alias }) => match decrypt(app, home, "reveal", &alias) {
                 Ok(value) => app.provide_plaintext(value),
                 Err(e) => app.set_error(format!("decrypt failed: {e:#}")),
             },
-            Some(Effect::Copy { alias }) => match decrypt(app, &alias) {
+            Some(Effect::Copy { alias }) => match decrypt(app, home, "copy", &alias) {
                 Ok(value) => match copy_with_autoclear(value) {
                     Ok(()) => {
                         app.set_success(format!("'{alias}' copied — clipboard clears in 15s"));
@@ -128,9 +128,9 @@ fn event_loop(app: &mut App, home: &std::path::Path) -> Result<()> {
     }
 }
 
-fn decrypt(app: &App, alias: &str) -> Result<String> {
-    let entry = app.vault.get(alias).context("entry vanished")?;
-    let identity = crypto::load_identity()?;
+fn decrypt(app: &App, home: &std::path::Path, action: &str, alias: &str) -> Result<String> {
+    let entry = app.vault.get(alias).context("entry vanished")?.clone();
+    let identity = crate::access::unlock(home, action, alias)?;
     crypto::decrypt_value(&identity, &entry.cipher)
 }
 

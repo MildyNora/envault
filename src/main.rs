@@ -1,5 +1,8 @@
 use clap::{Parser, Subcommand};
 
+mod access;
+mod audit;
+mod biometric;
 mod cdp;
 mod commands;
 mod crypto;
@@ -7,6 +10,7 @@ mod manifest;
 mod masker;
 mod paths;
 mod platform;
+mod settings;
 mod store;
 mod tui;
 
@@ -19,6 +23,12 @@ mod tui;
 struct Cli {
     #[command(subcommand)]
     cmd: Option<Cmd>,
+}
+
+#[derive(Subcommand)]
+enum ConfigAction {
+    /// Change a setting: `envault config set audit-log on`
+    Set { key: String, value: String },
 }
 
 #[derive(Subcommand)]
@@ -42,6 +52,16 @@ enum Cmd {
     Ls {
         #[arg(long)]
         json: bool,
+    },
+    /// View the audit log of secret accesses (human-only; system-prompt gated)
+    Audit {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show or change settings (audit-log, touch-id)
+    Config {
+        #[command(subcommand)]
+        action: Option<ConfigAction>,
     },
     /// Map a project env var to a vault alias in envault.toml
     Link { env_var: String, alias: String },
@@ -106,6 +126,11 @@ fn main() {
             stdin,
         }) => commands::add::cmd_add(alias, label, url, notes, stdin),
         Some(Cmd::Ls { json }) => commands::ls::cmd_ls(json),
+        Some(Cmd::Audit { json }) => commands::audit::cmd_audit(json),
+        Some(Cmd::Config { action }) => match action {
+            None => commands::config::cmd_config_show(),
+            Some(ConfigAction::Set { key, value }) => commands::config::cmd_config_set(key, value),
+        },
         Some(Cmd::Link { env_var, alias }) => commands::link::cmd_link(env_var, alias),
         Some(Cmd::Fill {
             alias,
