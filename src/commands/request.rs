@@ -88,6 +88,10 @@ pub fn cmd_request(
     eprintln!("envault: waiting for the user to respond to the secret request for '{name}'…");
 
     let result = wait_for_result(&session.join("result.json"), 600)?;
+    // Close the spawned window from here — the parent runs OUTSIDE that window,
+    // so once the window's process has exited it's an idle login shell and
+    // Terminal closes it with no "terminate the running process?" dialog.
+    close_spawned_window(&session);
     let _ = std::fs::remove_dir_all(&session);
     match result {
         Some(r) if r.outcome == "granted" => {
@@ -120,21 +124,16 @@ pub fn cmd_request_window(session: PathBuf) -> Result<()> {
     let raw = std::fs::read_to_string(session.join("request.json"))
         .with_context(|| format!("reading {}", session.join("request.json").display()))?;
     let meta: RequestFile = serde_json::from_str(&raw)?;
-    let own_tty = current_tty();
+
+    // Record our window's tty so the parent (outside this window) can close us.
+    if let Some(tty) = current_tty() {
+        let _ = std::fs::write(session.join("window.tty"), &tty);
+    }
 
     let outcome = run_window(&meta_to_request(&meta))?;
     let home = paths::envault_home();
     finish(&home, &meta, outcome, Some(&session))?;
-
-    // Schedule the window to close a beat AFTER this process exits. Closing it
-    // while we're still running makes Terminal pop a "terminate the running
-    // process?" dialog; closing once only the idle login shell remains does
-    // not (with the default profile). The closer is detached into its own
-    // process group so it doesn't keep the window busy either.
-    if let Some(tty) = own_tty {
-        schedule_close(&tty);
-    }
-    println!("\n  ✔ done — this window will close itself.");
+    // The parent closes the window; just exit so it becomes an idle shell.
     Ok(())
 }
 
@@ -256,8 +255,24 @@ fn spawn_window(exe: &Path, session: &Path) -> Result<()> {
         session = shell_quote(&session.to_string_lossy()),
         exe = shell_quote(&exe.to_string_lossy()),
     );
+    // Open the window, then resize it to a small, centered popup so it reads as
+    // a temporary dialog rather than a full terminal.
     let script = format!(
-        "tell application \"Terminal\"\nactivate\ndo script \"{}\"\nend tell",
+        "tell application \"Finder\" to set sb to bounds of window of desktop\n\
+         set sw to item 3 of sb\n\
+         set sh to item 4 of sb\n\
+         set ww to 660\n\
+         set wh to 460\n\
+         set x1 to (sw - ww) / 2 as integer\n\
+         set y1 to (sh - wh) / 2 as integer\n\
+         tell application \"Terminal\"\n\
+         activate\n\
+         do script \"{}\"\n\
+         delay 0.2\n\
+         try\n\
+         set bounds of front window to {{x1, y1, x1 + ww, y1 + wh}}\n\
+         end try\n\
+         end tell",
         applescript_escape(&cmd),
     );
     // Suppress osascript's own output (e.g. "tab 1 of window id 2035") so it
@@ -315,8 +330,14 @@ fn run_window(meta: &RequestMeta) -> Result<Outcome> {
 }
 
 /// The controlling terminal device of this process, e.g. `/dev/ttys003`.
+/// `tty` must inherit our real stdin (fd 0) — `Command::output()` nulls stdin
+/// by default, which would make `tty` report "not a tty" and return None.
 fn current_tty() -> Option<String> {
-    let out = std::process::Command::new("tty").output().ok()?;
+    let out = std::process::Command::new("tty")
+        .stdin(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
     let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
     if s.starts_with("/dev/") {
         Some(s)
@@ -325,26 +346,29 @@ fn current_tty() -> Option<String> {
     }
 }
 
-/// Detach a helper that waits briefly, then closes exactly this Terminal
-/// window (matched by tty). By the time it fires, this process has exited and
-/// the window holds only the idle login shell, so Terminal closes it without a
-/// confirmation dialog. `saving no` also suppresses any save prompt.
-fn schedule_close(tty: &str) {
-    use std::os::unix::process::CommandExt;
+/// Close the spawned window from the parent (which is not inside it). The
+/// window process has just written its result and is exiting; a short wait lets
+/// it fully exit so the window is an idle login shell, which Terminal closes
+/// with no confirmation dialog. `saving no` suppresses any save prompt.
+fn close_spawned_window(session: &Path) {
+    let Ok(tty) = std::fs::read_to_string(session.join("window.tty")) else {
+        return;
+    };
+    let tty = tty.trim();
+    if tty.is_empty() {
+        return;
+    }
+    std::thread::sleep(std::time::Duration::from_millis(700));
     let script = format!(
-        "delay 0.4\ntell application \"Terminal\" to close (every window whose tty is \"{}\") saving no",
+        "tell application \"Terminal\" to close (every window whose tty is \"{}\") saving no",
         applescript_escape(tty),
     );
-    let mut cmd = std::process::Command::new("osascript");
-    cmd.arg("-e")
+    let _ = std::process::Command::new("osascript")
+        .arg("-e")
         .arg(&script)
-        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    // New process group: the closer must not count as a process running in the
-    // window, or its very presence would re-trigger the confirmation.
-    cmd.process_group(0);
-    let _ = cmd.spawn();
+        .stderr(std::process::Stdio::null())
+        .status();
 }
 
 /// A short, human-meaningful description of the process that launched us, for
