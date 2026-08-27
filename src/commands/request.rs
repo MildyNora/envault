@@ -358,7 +358,10 @@ fn close_spawned_window(session: &Path) {
     if tty.is_empty() {
         return;
     }
-    std::thread::sleep(std::time::Duration::from_millis(700));
+    // Just long enough for the window's process to finish exiting (so the
+    // window is an idle login shell and Terminal closes it with no prompt),
+    // but short enough to feel immediate after Enter.
+    std::thread::sleep(std::time::Duration::from_millis(200));
     let script = format!(
         "tell application \"Terminal\" to close (every window whose tty is \"{}\") saving no",
         applescript_escape(tty),
