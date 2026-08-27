@@ -243,8 +243,16 @@ fn new_session_dir(home: &Path) -> Result<PathBuf> {
 fn spawn_window(exe: &Path, session: &Path) -> Result<()> {
     // Run the window command in a new Terminal.app window, telling it which
     // session to report into. AppleScript's `do script` opens the window.
+    // Carry the caller's vault selection into the fresh login shell that
+    // `do script` spawns, so the window writes to the same vault we checked.
+    let mut env_prefix = String::new();
+    for key in ["ENVAULT_HOME", "ENVAULT_IDENTITY_FILE"] {
+        if let Ok(val) = std::env::var(key) {
+            env_prefix.push_str(&format!("{key}={} ", shell_quote(&val)));
+        }
+    }
     let cmd = format!(
-        "{exe} request-window {session}",
+        "{env_prefix}{exe} request-window {session}",
         session = shell_quote(&session.to_string_lossy()),
         exe = shell_quote(&exe.to_string_lossy()),
     );
