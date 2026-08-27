@@ -362,7 +362,13 @@ fn fill_types_secret_into_browser_without_printing_it() {
     let te = TestEnv::new();
     te.init();
     te.envault()
-        .args(["add", "site-login", "--url", "https://example.com", "--stdin"])
+        .args([
+            "add",
+            "site-login",
+            "--url",
+            "https://example.com",
+            "--stdin",
+        ])
         .write_stdin("hunter2-secret-99\n")
         .assert()
         .success();
@@ -375,7 +381,10 @@ fn fill_types_secret_into_browser_without_printing_it() {
         .success();
     let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
     assert!(stdout.contains("site-login"), "{stdout}");
-    assert!(!stdout.contains("hunter2-secret-99"), "value must never print");
+    assert!(
+        !stdout.contains("hunter2-secret-99"),
+        "value must never print"
+    );
 
     let msgs = received.lock().unwrap();
     assert!(msgs
@@ -396,7 +405,13 @@ fn fill_refuses_on_host_mismatch() {
     let te = TestEnv::new();
     te.init();
     te.envault()
-        .args(["add", "site-login", "--url", "https://example.com", "--stdin"])
+        .args([
+            "add",
+            "site-login",
+            "--url",
+            "https://example.com",
+            "--stdin",
+        ])
         .write_stdin("hunter2-secret-99\n")
         .assert()
         .success();

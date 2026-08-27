@@ -37,6 +37,21 @@ processes launched by `envault run`. Follow these rules exactly.
 6. **envault not installed?** (`command -v envault` fails) Ask the user to
    install it (from this repo: `cargo install --path .`), then `envault init`.
 
+## Browser form-fill (logins the agent performs, values it never sees)
+
+When logging into a website for the user with a browser you control over CDP:
+
+1. Navigate to the login form as usual and find the field's CSS selector.
+2. Run `envault fill <alias> --selector '<css>'` instead of typing the
+   credential yourself. The value flows vault → browser directly; you get
+   only success/failure back. (`--cdp <url>` if the browser's DevTools
+   endpoint is not `http://127.0.0.1:9222`.)
+3. Never screenshot immediately after filling a *visible* (non-password)
+   field — the value would appear in the image. Password inputs render
+   masked, so they are safe to screenshot.
+4. If fill refuses because the page host doesn't match the secret's
+   registered URL, tell the user — never work around the refusal.
+
 ## Command cheat sheet (all agent-safe)
 
 | Need | Command |
@@ -46,3 +61,4 @@ processes launched by `envault run`. Follow these rules exactly.
 | Run with secrets | `envault run -- npm start` |
 | Extra one-off mapping | `envault run --env VAR=alias -- <cmd>` |
 | Encrypt an existing .env | `envault import .env` |
+| Fill a browser login field | `envault fill <alias> --selector '#password'` |

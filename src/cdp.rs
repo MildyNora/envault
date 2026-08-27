@@ -32,7 +32,10 @@ pub fn pick_page_target(targets: &[Target]) -> Option<&Target> {
 }
 
 fn host_of(u: &str) -> Option<String> {
-    url::Url::parse(u).ok()?.host_str().map(|h| h.to_lowercase())
+    url::Url::parse(u)
+        .ok()?
+        .host_str()
+        .map(|h| h.to_lowercase())
 }
 
 pub fn host_matches(secret_url: &str, page_url: &str) -> bool {
@@ -90,7 +93,10 @@ fn cdp_call(
     ws.send(Message::Text(msg.to_string()))
         .with_context(|| format!("sending {method}"))?;
     loop {
-        match ws.read().with_context(|| format!("awaiting {method} reply"))? {
+        match ws
+            .read()
+            .with_context(|| format!("awaiting {method} reply"))?
+        {
             Message::Text(t) => {
                 let v: serde_json::Value = serde_json::from_str(&t)?;
                 if v.get("id").and_then(|i| i.as_u64()) == Some(id) {
@@ -122,7 +128,11 @@ mod tests {
         let targets = vec![
             t("background_page", "chrome-extension://x", Some("ws://a")),
             t("page", "devtools://devtools/inspector.html", Some("ws://b")),
-            t("page", "chrome://omnibox-popup.top-chrome/", Some("ws://omni")),
+            t(
+                "page",
+                "chrome://omnibox-popup.top-chrome/",
+                Some("ws://omni"),
+            ),
             t("page", "chrome-extension://abc/bg.html", Some("ws://ext")),
             t("page", "https://example.com/login", None),
             t("page", "https://example.com/login", Some("ws://c")),
@@ -144,7 +154,10 @@ mod tests {
             "https://example.com/settings",
             "http://example.com/other"
         ));
-        assert!(!host_matches("https://example.com", "https://evil-example.com"));
+        assert!(!host_matches(
+            "https://example.com",
+            "https://evil-example.com"
+        ));
         assert!(!host_matches("https://example.com", "not a url"));
         assert!(!host_matches("", "https://example.com"));
     }

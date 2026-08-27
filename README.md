@@ -14,6 +14,12 @@ plaintext exists only inside the process that needs it.
 - `envault import .env` — encrypt an existing dotenv file, then delete it.
 - Output of `envault run` is masked: injected values (and their base64/URL
   forms) print as `[envault:<alias>]`.
+- `envault fill <alias> --selector '#password'` — type a secret straight into
+  a browser page over CDP (launch the browser with
+  `--remote-debugging-port=9222`). The agent driving the browser never sees
+  the value; if the secret has a `url`, filling on a different host is
+  refused. Don't screenshot right after filling a visible (non-password)
+  field — password inputs render masked, plain text fields don't.
 
 ## Agent integration (Claude Code plugin)
 

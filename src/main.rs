@@ -88,7 +88,11 @@ fn main() {
         }) => commands::add::cmd_add(alias, label, url, notes, stdin),
         Some(Cmd::Ls { json }) => commands::ls::cmd_ls(json),
         Some(Cmd::Link { env_var, alias }) => commands::link::cmd_link(env_var, alias),
-        Some(Cmd::Fill { alias, selector, cdp }) => commands::fill::cmd_fill(alias, selector, cdp),
+        Some(Cmd::Fill {
+            alias,
+            selector,
+            cdp,
+        }) => commands::fill::cmd_fill(alias, selector, cdp),
         Some(Cmd::GuardCheck) => match commands::guard::cmd_guard_check() {
             Ok(code) => std::process::exit(code),
             Err(e) => Err(e),
