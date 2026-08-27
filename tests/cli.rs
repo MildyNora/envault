@@ -489,6 +489,50 @@ fn rotate_reencrypts_and_values_survive() {
 }
 
 #[test]
+fn request_for_existing_secret_short_circuits() {
+    let te = TestEnv::new();
+    te.init();
+    te.envault()
+        .args(["add", "openrouter", "--stdin"])
+        .write_stdin("sk-existing-1\n")
+        .assert()
+        .success();
+    // already present → exit 0, no window, and the value never appears
+    let out = te
+        .envault()
+        .args(["request", "openrouter", "--reason", "need it"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(stdout.contains("already in the vault"), "{stdout}");
+    assert!(!stdout.contains("sk-existing-1"));
+}
+
+#[test]
+fn request_without_window_tells_agent_how_to_proceed() {
+    let te = TestEnv::new();
+    te.init();
+    // ENVAULT_NO_WINDOW forces the headless fallback (exit 6 + guidance)
+    te.envault()
+        .env("ENVAULT_NO_WINDOW", "1")
+        .args(["request", "newkey", "--reason", "need a new key"])
+        .assert()
+        .code(6)
+        .stderr(predicates::str::contains("request-window"));
+}
+
+#[test]
+fn request_rejects_bad_name() {
+    let te = TestEnv::new();
+    te.init();
+    te.envault()
+        .args(["request", "Bad_Name", "--reason", "x"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("kebab-case"));
+}
+
+#[test]
 fn init_twice_fails() {
     let te = TestEnv::new();
     te.init();

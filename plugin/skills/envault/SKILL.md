@@ -30,10 +30,16 @@ processes launched by `envault run`. Follow these rules exactly.
 3. **Run things through the wrapper**: `envault run -- <command>` for anything
    that needs the secrets (dev servers, tests, scripts). Output is masked:
    injected values print as `[envault:<alias>]`.
-4. **Missing secret?** If the alias you need is not in `envault ls`, STOP and
-   ask the user to add it: they run `envault add <alias>` (hidden prompt) or
-   the `envault` dashboard in their own terminal. Wait for their go-ahead,
-   then re-check `envault ls --json` and continue.
+4. **Missing secret?** If the name you need is not in `envault ls`, request it
+   — do NOT ask the user to paste it into the chat. Run:
+   `envault request <name> --reason "why you need it" --agent "Claude Code"`
+   (add `--label "…"` if useful). This pops a window where the user pastes the
+   value straight into the vault; you never see it. Interpret the exit code:
+   **0** = granted (the secret is now in the vault — continue and use it via
+   `envault run`); **3** = declined (the user's reason is printed on stderr —
+   respect it, don't retry blindly); **4** = cancelled; **5** = timed out;
+   **6** = no window could open (tell the user the printed manual command).
+   Always pass `--agent` so the user can see who's asking.
 5. **Plaintext .env in the repo?** Offer to run `envault import .env` (it
    encrypts every entry into the vault and links the manifest), then suggest
    the user delete the file.
@@ -64,4 +70,5 @@ When logging into a website for the user with a browser you control over CDP:
 | Run with secrets | `envault run -- npm start` |
 | Extra one-off mapping | `envault run --env VAR=alias -- <cmd>` |
 | Encrypt an existing .env | `envault import .env` |
+| Request a missing secret | `envault request <name> --reason "…" --agent "Claude Code"` |
 | Fill a browser login field | `envault fill <alias> --selector '#password'` |

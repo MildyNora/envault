@@ -51,6 +51,14 @@ pub fn guard_decision(
                             .to_string(),
                     );
                 }
+                if seg.starts_with("envault request-window") {
+                    return Some(
+                        "envault guard: the request window is the human's side of a \
+                         secret handoff. Use `envault request <name> --reason ...` \
+                         instead — it opens the window for the user."
+                            .to_string(),
+                    );
+                }
             }
         }
     }
@@ -128,12 +136,23 @@ mod tests {
     }
 
     #[test]
+    fn blocks_request_window_but_allows_request() {
+        // the human-facing window is off-limits to agents…
+        let win = json!({"command": "envault request-window /tmp/x"});
+        assert!(guard_decision("Bash", &win, HOME).is_some());
+        // …but the request channel itself is the sanctioned agent path
+        let req = json!({"command": "envault request openrouter --reason x"});
+        assert!(guard_decision("Bash", &req, HOME).is_none());
+    }
+
+    #[test]
     fn allows_normal_envault_usage_and_other_tools() {
         for cmd in [
             "envault ls --json",
             "envault run -- npm test",
             "envault link OPENROUTER_API_KEY openrouter",
             "envault import .env",
+            "envault request openrouter --reason \"need it\"",
             "ls -la",
         ] {
             let input = json!({"command": cmd});

@@ -1,4 +1,6 @@
 pub mod app;
+pub mod request;
+pub mod theme;
 pub mod ui;
 
 use anyhow::{bail, Context, Result};

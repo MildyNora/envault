@@ -1,18 +1,11 @@
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
 
 use super::app::{App, Keychain, Mode, StatusKind, COMMANDS, FIELD_NAMES};
-
-// Adaptive ANSI palette — resolves against the user's terminal theme.
-const ACCENT: Color = Color::Cyan;
-const KEYCAP: Color = Color::Yellow;
-const DIM: Color = Color::DarkGray;
-const OK: Color = Color::Green;
-const ERR: Color = Color::Red;
-const DOTS: Color = Color::Yellow;
+use super::theme::{ACCENT, DIM, DOTS, ERR, KEYCAP, OK};
 
 // Big block wordmark ("envault"), colored + filled.
 const BANNER: &str = r#"
@@ -167,36 +160,43 @@ fn draw_list(frame: &mut Frame, area: Rect, app: &App) {
         )
     };
 
-    let items: Vec<ListItem> = if visible.is_empty() {
-        vec![ListItem::new(Line::styled(
-            "  empty — press 'a' or run `envault add`",
-            Style::default().fg(DIM),
-        ))]
+    let mut items: Vec<ListItem> = visible
+        .iter()
+        .enumerate()
+        .map(|(i, e)| {
+            let selected = i == app.selected;
+            let bar = if selected { "▌" } else { " " };
+            let num = i + 1;
+            let mut spans = vec![
+                Span::styled(bar, Style::default().fg(ACCENT)),
+                Span::styled(
+                    format!("{num} "),
+                    Style::default().fg(if selected { KEYCAP } else { DIM }),
+                ),
+            ];
+            let name_style = if selected {
+                Style::default().add_modifier(Modifier::BOLD).fg(ACCENT)
+            } else {
+                Style::default().add_modifier(Modifier::BOLD)
+            };
+            spans.push(Span::styled(e.alias.clone(), name_style));
+            ListItem::new(Line::from(spans))
+        })
+        .collect();
+
+    // The "＋ add new secret" row sits below the last secret and is selectable.
+    let add_selected = app.on_add_row();
+    let add_bar = if add_selected { "▌" } else { " " };
+    let add_style = if add_selected {
+        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
     } else {
-        visible
-            .iter()
-            .enumerate()
-            .map(|(i, e)| {
-                let selected = i == app.selected;
-                let bar = if selected { "▌" } else { " " };
-                let num = i + 1;
-                let mut spans = vec![
-                    Span::styled(bar, Style::default().fg(ACCENT)),
-                    Span::styled(
-                        format!("{num} "),
-                        Style::default().fg(if selected { KEYCAP } else { DIM }),
-                    ),
-                ];
-                let name_style = if selected {
-                    Style::default().add_modifier(Modifier::BOLD).fg(ACCENT)
-                } else {
-                    Style::default().add_modifier(Modifier::BOLD)
-                };
-                spans.push(Span::styled(e.alias.clone(), name_style));
-                ListItem::new(Line::from(spans))
-            })
-            .collect()
+        Style::default().fg(DIM)
     };
+    items.push(ListItem::new(Line::from(vec![
+        Span::styled(add_bar, Style::default().fg(ACCENT)),
+        Span::styled("＋ ", Style::default().fg(KEYCAP)),
+        Span::styled("add new secret", add_style),
+    ])));
 
     let border = if searching { KEYCAP } else { ACCENT };
     let list = List::new(items).block(
@@ -204,15 +204,7 @@ fn draw_list(frame: &mut Frame, area: Rect, app: &App) {
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(border))
-            .title(title)
-            .title_bottom(Line::from(vec![
-                Span::styled(" ", Style::default()),
-                Span::styled(
-                    "a",
-                    Style::default().fg(KEYCAP).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(" add ", Style::default().fg(DIM)),
-            ])),
+            .title(title),
     );
     frame.render_widget(list, area);
 }
@@ -306,17 +298,34 @@ const LABEL: usize = 2;
 
 fn detail_view(app: &App) -> (String, Vec<Line<'static>>) {
     let Some(alias) = app.selected_alias() else {
+        // The add row is selected (or the vault is empty).
+        let headline = if app.vault.secrets.is_empty() {
+            "No secrets yet."
+        } else {
+            "Add a new secret."
+        };
         return (
-            " details ".into(),
+            " add ".into(),
             vec![
-                Line::styled(
-                    "No secrets yet.",
-                    Style::default().add_modifier(Modifier::BOLD),
-                ),
+                Line::styled(headline, Style::default().add_modifier(Modifier::BOLD)),
                 Line::from(""),
-                Line::styled("Add one with:", Style::default().fg(DIM)),
-                Line::styled("  a", Style::default().fg(KEYCAP)),
-                Line::styled("  or `envault add <name>`", Style::default().fg(DIM)),
+                Line::from(vec![
+                    Span::styled("Press ", Style::default().fg(DIM)),
+                    Span::styled(
+                        "Enter",
+                        Style::default().fg(KEYCAP).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(" or ", Style::default().fg(DIM)),
+                    Span::styled(
+                        "→",
+                        Style::default().fg(KEYCAP).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(" to add — the agent-facing", Style::default().fg(DIM)),
+                ]),
+                Line::styled(
+                    "way is `envault request` (a request window).",
+                    Style::default().fg(DIM),
+                ),
             ],
         );
     };
@@ -795,9 +804,18 @@ mod tests {
     }
 
     #[test]
-    fn list_shows_add_affordance() {
+    fn list_shows_add_row_below_secrets() {
         let text = render(&test_app());
-        assert!(text.contains("a add"), "list must hint the add key: {text}");
+        let lines: Vec<&str> = text.lines().collect();
+        let secret_row = lines.iter().position(|l| l.contains("openrouter")).unwrap();
+        let add_row = lines
+            .iter()
+            .position(|l| l.contains("add new secret"))
+            .expect("add row present");
+        assert!(
+            add_row > secret_row,
+            "add row sits below the secrets: {text}"
+        );
     }
 
     #[test]
@@ -818,7 +836,11 @@ mod tests {
         let id = generate_identity();
         let app = App::new(Vault::default(), id.to_public());
         let text = render(&app);
-        assert!(text.contains("envault add"), "onboarding hint: {text}");
+        assert!(
+            text.contains("No secrets yet"),
+            "onboarding headline: {text}"
+        );
+        assert!(text.contains("add new secret"), "add row present: {text}");
     }
 
     #[test]

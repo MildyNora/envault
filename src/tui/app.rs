@@ -154,11 +154,10 @@ impl App {
     }
 
     fn clamp_selection(&mut self) {
-        let len = self.visible().len();
-        if len == 0 {
-            self.selected = 0;
-        } else if self.selected >= len {
-            self.selected = len - 1;
+        // the add row (index == len) is a valid landing spot
+        let max = self.visible().len();
+        if self.selected > max {
+            self.selected = max;
         }
     }
 
@@ -196,12 +195,46 @@ impl App {
         }
     }
 
+    /// Index of the phantom "＋ add" row — one past the last secret.
+    pub fn add_row_index(&self) -> usize {
+        self.visible().len()
+    }
+
+    /// True when the selection is on the phantom add row, not a secret.
+    pub fn on_add_row(&self) -> bool {
+        self.selected >= self.add_row_index()
+    }
+
+    fn open_add(&mut self) {
+        self.mode = Mode::Add(Form {
+            fields: Default::default(),
+            focus: NAME,
+            editing_alias: None,
+        });
+    }
+
+    fn open_edit(&mut self, alias: &str) {
+        let e = self.vault.get(alias).expect("selected exists");
+        self.mode = Mode::Edit(Form {
+            fields: [
+                e.alias.clone(),
+                String::new(), // empty value keeps the old cipher
+                e.label.clone(),
+                e.url.clone().unwrap_or_default(),
+                e.notes.clone(),
+            ],
+            focus: VALUE, // name is locked; start on value
+            editing_alias: Some(alias.to_string()),
+        });
+    }
+
     fn on_list_key(&mut self, key: KeyEvent) -> Option<Effect> {
         self.mode = Mode::List;
         match key.code {
             KeyCode::Char('q') => return Some(Effect::Quit),
             KeyCode::Char('j') | KeyCode::Down => {
-                if self.selected + 1 < self.visible().len() {
+                // stop on the add row (index == len), never past it
+                if self.selected < self.add_row_index() {
                     self.selected += 1;
                 }
             }
@@ -218,27 +251,15 @@ impl App {
             KeyCode::Char(':') => {
                 self.mode = Mode::Command(CommandLine::default());
             }
-            KeyCode::Char('a') => {
-                self.mode = Mode::Add(Form {
-                    fields: Default::default(),
-                    focus: NAME,
-                    editing_alias: None,
-                });
-            }
+            KeyCode::Char('a') => self.open_add(),
+            // Enter / → activate the highlighted row: edit a secret, or add.
+            KeyCode::Enter | KeyCode::Right => match self.selected_alias() {
+                Some(alias) => self.open_edit(&alias),
+                None => self.open_add(),
+            },
             KeyCode::Char('e') => {
                 if let Some(alias) = self.selected_alias() {
-                    let e = self.vault.get(&alias).expect("selected exists");
-                    self.mode = Mode::Edit(Form {
-                        fields: [
-                            e.alias.clone(),
-                            String::new(), // empty value keeps the old cipher
-                            e.label.clone(),
-                            e.url.clone().unwrap_or_default(),
-                            e.notes.clone(),
-                        ],
-                        focus: VALUE, // name is locked; start on value
-                        editing_alias: Some(alias),
-                    });
+                    self.open_edit(&alias);
                 }
             }
             KeyCode::Char('d') => {
@@ -644,6 +665,42 @@ mod tests {
             panic!("expected edit mode")
         };
         assert_eq!(form.focus, 1);
+    }
+
+    #[test]
+    fn right_arrow_opens_edit_on_a_secret() {
+        let (mut app, _) = app_with(&["a-key"]);
+        app.handle_key(key(KeyCode::Right));
+        assert!(matches!(app.mode, Mode::Edit(_)), "→ opens edit");
+    }
+
+    #[test]
+    fn add_row_sits_below_last_and_activates_add() {
+        let (mut app, _) = app_with(&["a-key", "b-key"]);
+        // down past the last secret lands on the phantom "add" row
+        app.handle_key(ch('j'));
+        app.handle_key(ch('j'));
+        assert_eq!(app.selected, 2, "add row is index == len");
+        assert!(app.selected_alias().is_none(), "add row is not a secret");
+        // Enter (or →) on the add row opens the add form
+        app.handle_key(key(KeyCode::Enter));
+        assert!(matches!(app.mode, Mode::Add(_)), "Enter on add row adds");
+    }
+
+    #[test]
+    fn add_row_is_the_only_row_when_empty() {
+        let (mut app, _) = app_with(&[]);
+        assert_eq!(app.selected, 0);
+        assert!(app.selected_alias().is_none());
+        app.handle_key(key(KeyCode::Right));
+        assert!(matches!(app.mode, Mode::Add(_)), "→ on empty adds");
+    }
+
+    #[test]
+    fn enter_on_a_secret_opens_edit() {
+        let (mut app, _) = app_with(&["a-key"]);
+        app.handle_key(key(KeyCode::Enter));
+        assert!(matches!(app.mode, Mode::Edit(_)));
     }
 
     #[test]
