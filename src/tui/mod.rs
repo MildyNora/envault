@@ -68,15 +68,12 @@ fn event_loop(app: &mut App, home: &std::path::Path) -> Result<()> {
                 Err(e) => app.set_error(format!("decrypt failed: {e:#}")),
             },
             Some(Effect::Copy { alias }) => match decrypt(app, &alias) {
-                Ok(value) => {
-                    app.mark_keychain_unlocked();
-                    match copy_with_autoclear(value) {
-                        Ok(()) => {
-                            app.set_success(format!("'{alias}' copied — clipboard clears in 15s"));
-                        }
-                        Err(e) => app.set_error(format!("clipboard failed: {e:#}")),
+                Ok(value) => match copy_with_autoclear(value) {
+                    Ok(()) => {
+                        app.set_success(format!("'{alias}' copied — clipboard clears in 15s"));
                     }
-                }
+                    Err(e) => app.set_error(format!("clipboard failed: {e:#}")),
+                },
                 Err(e) => app.set_error(format!("decrypt failed: {e:#}")),
             },
             Some(Effect::Rotate) => match crate::commands::rotate::rotate_in_place(home) {

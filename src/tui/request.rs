@@ -141,7 +141,7 @@ pub fn draw(frame: &mut Frame, app: &RequestApp) {
 
     if app.declining() {
         lines.push(Line::styled(
-            "  Declining — the agent will see this note:",
+            "  Declining — add a note for the agent (optional):",
             Style::default().fg(ERR),
         ));
         lines.push(Line::from(vec![
@@ -149,6 +149,10 @@ pub fn draw(frame: &mut Frame, app: &RequestApp) {
             Span::raw(app.note.clone()),
             Span::styled("▏", Style::default().fg(ACCENT)),
         ]));
+        lines.push(Line::styled(
+            "                press Enter to decline (with or without a note)",
+            Style::default().fg(DIM),
+        ));
     } else {
         let dots = "•".repeat(app.value.chars().count());
         lines.push(Line::from(vec![
@@ -280,6 +284,18 @@ mod tests {
         assert_eq!(
             app.handle_key(key(KeyCode::Enter)),
             Some(Outcome::Declined("use OpenAI instead".into()))
+        );
+    }
+
+    #[test]
+    fn decline_with_empty_note_is_allowed() {
+        let mut app = RequestApp::new(meta());
+        app.handle_key(ch('n')); // into decline
+        assert!(app.declining());
+        // press Enter immediately, no note typed
+        assert_eq!(
+            app.handle_key(key(KeyCode::Enter)),
+            Some(Outcome::Declined(String::new()))
         );
     }
 

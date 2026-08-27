@@ -4,7 +4,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
 
-use super::app::{App, Keychain, Mode, StatusKind, COMMANDS, FIELD_NAMES};
+use super::app::{App, Mode, StatusKind, COMMANDS, FIELD_NAMES};
 use super::theme::{ACCENT, DIM, DOTS, ERR, KEYCAP, OK};
 
 // Big block wordmark ("envault"), colored + filled.
@@ -448,18 +448,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
             spans.extend(hint("?", "help"));
         }
     }
-    // key-guide on the left …
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
-    // … Keychain grant status on the right (always visible).
-    let (dot, label, color) = match app.keychain {
-        Keychain::Locked => ("●", "keychain: will prompt", ERR),
-        Keychain::UnlockedThisSession => ("●", "keychain: unlocked (session)", OK),
-    };
-    let badge = Line::from(vec![
-        Span::styled(dot, Style::default().fg(color)),
-        Span::styled(format!(" {label} "), Style::default().fg(DIM)),
-    ]);
-    frame.render_widget(Paragraph::new(badge).alignment(Alignment::Right), area);
 }
 
 fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
@@ -776,16 +765,6 @@ mod tests {
             text.contains("revokes"),
             "palette shows description: {text}"
         );
-    }
-
-    #[test]
-    fn keychain_badge_reflects_state() {
-        let locked = render(&test_app());
-        assert!(locked.contains("will prompt"), "locked badge: {locked}");
-        let mut app = test_app();
-        app.mark_keychain_unlocked();
-        let unlocked = render(&app);
-        assert!(unlocked.contains("unlocked"), "unlocked badge: {unlocked}");
     }
 
     #[test]

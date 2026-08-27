@@ -58,13 +58,8 @@ pub fn cmd_request(
         caller: caller_description(),
     };
 
-    // If we already have a terminal (a human ran this), just do it inline.
-    if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
-        let outcome = run_window(&meta_to_request(&meta))?;
-        return finish(&home, &meta, outcome, None);
-    }
-
-    // Agent side: stage a session, pop a window, wait for the result.
+    // Always open a FRESH window — even when run from a terminal — so the
+    // request UI is its own popup and never takes over the current terminal.
     let session = new_session_dir(&home)?;
     std::fs::write(session.join("request.json"), serde_json::to_string(&meta)?)?;
 
@@ -76,7 +71,13 @@ pub fn cmd_request(
         spawn_window(&exe, &session)
     };
     if let Err(e) = spawn {
-        // No GUI (headless/CI): tell the agent how the human can complete it.
+        let _ = std::fs::remove_dir_all(&session);
+        // Fall back to inline only if no window could open but we still have a
+        // terminal to run in (e.g. SSH). Otherwise, guide the user.
+        if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
+            let outcome = run_window(&meta_to_request(&meta))?;
+            return finish(&home, &meta, outcome, None);
+        }
         eprintln!(
             "envault: couldn't open a request window ({e}). Ask the user to run:\n  \
              {} request-window {}",
