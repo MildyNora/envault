@@ -1,7 +1,21 @@
-use base64::engine::general_purpose::STANDARD as B64;
+use base64::engine::general_purpose::{
+    STANDARD as B64, STANDARD_NO_PAD as B64_NP, URL_SAFE as B64U, URL_SAFE_NO_PAD as B64U_NP,
+};
 use base64::Engine;
 
 const MIN_MASK_LEN: usize = 6;
+
+fn hex(bytes: &[u8], upper: bool) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        if upper {
+            s.push_str(&format!("{b:02X}"));
+        } else {
+            s.push_str(&format!("{b:02x}"));
+        }
+    }
+    s
+}
 
 pub struct Masker {
     /// (pattern bytes, replacement bytes), longest pattern first
@@ -18,13 +32,23 @@ impl Masker {
                 continue;
             }
             let replacement = format!("[envault:{alias}]").into_bytes();
-            let mut forms = vec![value.clone().into_bytes(), B64.encode(value).into_bytes()];
-            let url = urlencoding::encode(value).into_owned().into_bytes();
-            if url != value.as_bytes() {
-                forms.push(url);
-            }
+            // Cover the common re-encodings a value might appear in. (L1)
+            let mut forms: Vec<Vec<u8>> = vec![
+                value.clone().into_bytes(),
+                B64.encode(value).into_bytes(),
+                B64_NP.encode(value).into_bytes(),
+                B64U.encode(value).into_bytes(),
+                B64U_NP.encode(value).into_bytes(),
+                hex(value.as_bytes(), false).into_bytes(),
+                hex(value.as_bytes(), true).into_bytes(),
+                urlencoding::encode(value).into_owned().into_bytes(),
+            ];
+            forms.sort();
+            forms.dedup();
             for f in forms {
-                patterns.push((f, replacement.clone()));
+                if f.len() >= MIN_MASK_LEN {
+                    patterns.push((f, replacement.clone()));
+                }
             }
         }
         // longest first, so a longer form wins when forms overlap

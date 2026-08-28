@@ -125,20 +125,33 @@ fn event_loop(app: &mut App, home: &std::path::Path) -> Result<()> {
             // Toggling a setting is always gated — including here in the
             // dashboard — so turning the audit log off (or on) requires the
             // system prompt, not just being at the keyboard.
-            Some(Effect::ToggleAudit) => match crate::biometric::require("Change the envault audit log setting") {
-                Ok(()) => {
-                    app.settings.audit_log = !app.settings.audit_log;
-                    persist_settings(app, home, "audit log");
+            Some(Effect::ToggleAudit) => {
+                match crate::biometric::require("Change the envault audit log setting") {
+                    Ok(()) => {
+                        app.settings.audit_log = !app.settings.audit_log;
+                        persist_settings(app, home, "audit log");
+                    }
+                    Err(e) => app.set_error(format!("not changed: {e:#}")),
                 }
-                Err(e) => app.set_error(format!("not changed: {e:#}")),
-            },
-            Some(Effect::ToggleTouchId) => match crate::biometric::require("Change the envault Touch ID setting") {
-                Ok(()) => {
-                    app.settings.touch_id = !app.settings.touch_id;
-                    persist_settings(app, home, "Touch ID gate");
+            }
+            Some(Effect::ToggleTouchId) => {
+                match crate::biometric::require("Change the envault Touch ID setting") {
+                    Ok(()) => {
+                        app.settings.touch_id = !app.settings.touch_id;
+                        persist_settings(app, home, "Touch ID gate");
+                    }
+                    Err(e) => app.set_error(format!("not changed: {e:#}")),
                 }
-                Err(e) => app.set_error(format!("not changed: {e:#}")),
-            },
+            }
+            Some(Effect::ToggleFill) => {
+                match crate::biometric::require("Change the envault browser-fill setting") {
+                    Ok(()) => {
+                        app.settings.fill = !app.settings.fill;
+                        persist_settings(app, home, "browser fill");
+                    }
+                    Err(e) => app.set_error(format!("not changed: {e:#}")),
+                }
+            }
         }
         // Our own writes (save/rotate) just changed the file; adopt the new
         // mtime so the watcher above doesn't treat them as an external change.
@@ -149,6 +162,8 @@ fn event_loop(app: &mut App, home: &std::path::Path) -> Result<()> {
 fn persist_settings(app: &mut App, home: &std::path::Path, label: &str) {
     let state = if label.contains("audit") {
         app.settings.audit_log
+    } else if label.contains("fill") {
+        app.settings.fill
     } else {
         app.settings.touch_id
     };

@@ -38,10 +38,35 @@ fn host_of(u: &str) -> Option<String> {
         .map(|h| h.to_lowercase())
 }
 
+/// Full origin (scheme + host + port) for a strict comparison. (L2)
+fn origin_of(u: &str) -> Option<(String, String, u16)> {
+    let p = url::Url::parse(u).ok()?;
+    let host = p.host_str()?.to_lowercase();
+    let port = p.port_or_known_default()?;
+    Some((p.scheme().to_lowercase(), host, port))
+}
+
+/// True only if both URLs share scheme, host, AND port — prevents an `http://`
+/// or different-port page from receiving an `https://`-registered secret. (L2)
 pub fn host_matches(secret_url: &str, page_url: &str) -> bool {
-    match (host_of(secret_url), host_of(page_url)) {
+    match (origin_of(secret_url), origin_of(page_url)) {
         (Some(a), Some(b)) => a == b,
         _ => false,
+    }
+}
+
+/// True if the URL's host is loopback (127.0.0.0/8, ::1, localhost). We refuse
+/// to speak to a non-loopback DevTools endpoint, and refuse a target whose
+/// websocket points off-loopback — so a fake `/json/list` can't redirect the
+/// secret to a remote collector. (H1)
+pub fn is_loopback(u: &str) -> bool {
+    match host_of(u).as_deref() {
+        Some("localhost") | Some("::1") | Some("[::1]") => true,
+        Some(h) => h
+            .parse::<std::net::Ipv4Addr>()
+            .map(|ip| ip.is_loopback())
+            .unwrap_or(false),
+        None => false,
     }
 }
 
@@ -145,14 +170,21 @@ mod tests {
     }
 
     #[test]
-    fn host_matching_is_host_only_and_case_insensitive() {
+    fn origin_matching_is_scheme_host_port_and_case_insensitive() {
+        // same origin (case-insensitive host, default ports) matches
         assert!(host_matches(
             "https://openrouter.ai",
             "https://OPENROUTER.AI/login?x=1"
         ));
-        assert!(host_matches(
+        // scheme mismatch (http vs https) is now REFUSED (L2)
+        assert!(!host_matches(
             "https://example.com/settings",
             "http://example.com/other"
+        ));
+        // port mismatch is refused
+        assert!(!host_matches(
+            "https://example.com",
+            "https://example.com:8443"
         ));
         assert!(!host_matches(
             "https://example.com",
@@ -160,5 +192,14 @@ mod tests {
         ));
         assert!(!host_matches("https://example.com", "not a url"));
         assert!(!host_matches("", "https://example.com"));
+    }
+
+    #[test]
+    fn loopback_detection() {
+        assert!(is_loopback("http://127.0.0.1:9222"));
+        assert!(is_loopback("http://localhost:9222/json"));
+        assert!(is_loopback("ws://127.0.0.1:9222/devtools/page/1"));
+        assert!(!is_loopback("http://10.0.0.5:9222"));
+        assert!(!is_loopback("https://evil.example/json"));
     }
 }

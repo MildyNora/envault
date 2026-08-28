@@ -1002,7 +1002,7 @@ dependencies = [
 
 [[package]]
 name = "envault"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "age",
  "anyhow",
@@ -1014,6 +1014,7 @@ dependencies = [
  "crossterm",
  "dirs",
  "dotenvy",
+ "hmac",
  "keyring",
  "portable-pty",
  "predicates",

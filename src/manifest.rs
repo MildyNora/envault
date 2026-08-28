@@ -4,6 +4,16 @@ use std::path::{Path, PathBuf};
 
 pub const MANIFEST_NAME: &str = "envault.toml";
 
+/// A valid POSIX-ish environment variable name: `[A-Za-z_][A-Za-z0-9_]*`.
+pub fn is_valid_env_var(s: &str) -> bool {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 pub fn find_manifest(start: &Path) -> Option<PathBuf> {
     let mut dir = Some(start);
     while let Some(d) = dir {

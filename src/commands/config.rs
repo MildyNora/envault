@@ -7,8 +7,18 @@ use crate::settings::Settings;
 /// `envault config` — show settings. Reading is unguarded (no secrets here).
 pub fn cmd_config_show() -> Result<()> {
     let s = Settings::load(&paths::envault_home());
-    println!("audit-log : {}", on_off(s.audit_log));
-    println!("touch-id  : {}", on_off(s.touch_id));
+    println!(
+        "audit-log : {}   (log every decryption; view with `envault audit`)",
+        on_off(s.audit_log)
+    );
+    println!(
+        "touch-id  : {}   (require Touch ID/password before each decryption)",
+        on_off(s.touch_id)
+    );
+    println!(
+        "fill      : {}   (allow `envault fill`; origin guard is best-effort — see help)",
+        on_off(s.fill)
+    );
     Ok(())
 }
 
@@ -28,7 +38,8 @@ pub fn cmd_config_set(key: String, value: String) -> Result<()> {
     match key.as_str() {
         "audit-log" | "audit_log" | "audit" => s.audit_log = on,
         "touch-id" | "touch_id" | "touchid" => s.touch_id = on,
-        other => bail!("unknown setting '{other}' (try audit-log or touch-id)"),
+        "fill" => s.fill = on,
+        other => bail!("unknown setting '{other}' (try audit-log, touch-id, or fill)"),
     }
     s.save(&home)?;
     println!("set {key} = {}", on_off(on));

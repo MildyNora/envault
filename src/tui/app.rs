@@ -21,12 +21,13 @@ pub const FIELD_HELP: [&str; 5] = [
 ];
 
 /// Typable `:` commands: (name, description). Also drives the palette list.
-pub const COMMANDS: [(&str, &str); 5] = [
+pub const COMMANDS: [(&str, &str); 6] = [
     ("rotate", "re-key the vault · revokes Keychain grants"),
     ("help", "keys, commands & the security boundary"),
     ("quit", "exit the dashboard"),
     ("audit", "turn the audit log on/off"),
     ("touchid", "turn the Touch ID gate on/off"),
+    ("fill", "turn browser fill on/off (guard is best-effort)"),
 ];
 
 /// Indices into COMMANDS whose name starts with `input` (empty input = all).
@@ -75,6 +76,7 @@ pub enum Effect {
     Rotate,
     ToggleAudit,
     ToggleTouchId,
+    ToggleFill,
     Quit,
 }
 
@@ -396,6 +398,7 @@ impl App {
             "help" | "?" => self.mode = Mode::Help,
             "audit" => return Some(Effect::ToggleAudit),
             "touchid" | "touch-id" => return Some(Effect::ToggleTouchId),
+            "fill" => return Some(Effect::ToggleFill),
             "q" | "quit" | "exit" => return Some(Effect::Quit),
             other => {
                 self.set_error(format!("unknown command: {other}"));

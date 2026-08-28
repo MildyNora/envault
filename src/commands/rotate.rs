@@ -52,6 +52,16 @@ pub fn rotate_in_place(home: &Path) -> Result<RotateOutcome> {
 }
 
 pub fn cmd_rotate() -> Result<()> {
+    // In-binary human-only enforcement (not just the bypassable guard hook): an
+    // agent's non-interactive shell can't trigger destructive re-keying. Scoped
+    // to release so the non-TTY integration test still exercises rotation. (M3)
+    #[cfg(not(debug_assertions))]
+    if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        anyhow::bail!(
+            "`envault rotate` re-keys the whole vault and must be run interactively — \
+             run it yourself in a terminal."
+        );
+    }
     let outcome = rotate_in_place(&paths::envault_home())?;
     println!("Rotated {} secret(s) to a new keypair", outcome.count);
     println!("  new public key: {}", outcome.recipient);
