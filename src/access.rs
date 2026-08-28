@@ -2,7 +2,8 @@
 //! gate (when enabled) and audit logging, so every decryption path is covered
 //! consistently.
 
-use anyhow::Result;
+use age::secrecy::ExposeSecret;
+use anyhow::{Context, Result};
 use std::path::Path;
 
 use crate::{audit, biometric, crypto, settings::Settings};
@@ -17,8 +18,12 @@ pub fn unlock(home: &Path, action: &str, detail: &str) -> Result<age::x25519::Id
     }
     let identity = crypto::load_identity()?;
     if s.audit_log {
-        // Best-effort: a logging hiccup must not block the actual operation.
-        let _ = audit::record(home, action, detail);
+        // Key the log with the Keychain-protected identity so it can't be
+        // forged, and FAIL CLOSED: if we can't record the access, don't grant
+        // it (auditing was explicitly enabled). (M1)
+        let secret = identity.to_string();
+        audit::record(home, secret.expose_secret().as_bytes(), action, detail)
+            .context("audit logging failed and auditing is enabled — refusing to proceed")?;
     }
     Ok(identity)
 }

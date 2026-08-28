@@ -516,7 +516,7 @@ fn draw_confirm_popup(frame: &mut Frame, area: Rect, title: &str, body: &str) {
 }
 
 fn draw_help_overlay(frame: &mut Frame, area: Rect, app: &App) {
-    let popup = centered_rect(area, 66, 26);
+    let popup = centered_rect(area, 68, 30);
     frame.render_widget(Clear, popup);
     let key = |k: &str, d: &str| {
         Line::from(vec![
@@ -551,7 +551,20 @@ fn draw_help_overlay(frame: &mut Frame, area: Rect, app: &App) {
             ":touchid",
             &format!("Touch ID gate — now {}", on_off(app.settings.touch_id)),
         ),
+        key(
+            ":fill",
+            &format!("browser fill — now {}", on_off(app.settings.fill)),
+        ),
         key(":help / :quit", "this screen · exit"),
+        Line::from(""),
+        Line::styled(
+            "  fill ON lets `envault fill` type secrets into a loopback browser,",
+            Style::default().fg(DIM),
+        ),
+        Line::styled(
+            "  but a local process can spoof the target — keep OFF unless needed.",
+            Style::default().fg(DIM),
+        ),
         Line::from(""),
         head("What agents can see"),
         Line::styled(

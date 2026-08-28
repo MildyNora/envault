@@ -72,8 +72,11 @@ pub fn cmd_request(
     };
     if let Err(e) = spawn {
         let _ = std::fs::remove_dir_all(&session);
-        // Fall back to inline only if no window could open but we still have a
-        // terminal to run in (e.g. SSH). Otherwise, guide the user.
+        // Fall back to inline entry only in debug/test builds. In release we
+        // never render the secret-entry TUI in the caller's terminal, since a
+        // malicious agent could force spawn failure (ENVAULT_NO_WINDOW-style)
+        // and read the keystrokes from a PTY it controls. (M4)
+        #[cfg(debug_assertions)]
         if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
             let outcome = run_window(&meta_to_request(&meta))?;
             return finish(&home, &meta, outcome, None);
@@ -162,7 +165,7 @@ fn finish(
 ) -> Result<i32> {
     let (result, code) = match outcome {
         Outcome::Granted(value) => {
-            let recipient = crypto::load_recipient(home)?;
+            let recipient = crypto::recipient_from_identity()?;
             let cipher = crypto::encrypt_value(&recipient, &value)?;
             let mut vault = Vault::load(home)?;
             if vault.get(&meta.name).is_none() {
@@ -557,9 +560,15 @@ mod tests {
 
     #[test]
     fn grant_encrypts_into_vault_and_reports() {
+        // finish() derives the recipient from the (Keychain) identity; in tests
+        // that resolves through ENVAULT_IDENTITY_FILE, so set one up.
+        let _guard = crate::crypto::test_env_lock();
         let home = tempfile::TempDir::new().unwrap();
         let session = tempfile::TempDir::new().unwrap();
+        let id_path = home.path().join("id.txt");
+        std::env::set_var("ENVAULT_IDENTITY_FILE", &id_path);
         let id = generate_identity();
+        crate::crypto::store_identity(&id, home.path()).unwrap();
         store_recipient(&id, home.path()).unwrap();
         Vault::default().save(home.path()).unwrap();
 
@@ -570,6 +579,7 @@ mod tests {
             Some(session.path()),
         )
         .unwrap();
+        std::env::remove_var("ENVAULT_IDENTITY_FILE");
         assert_eq!(code, 0);
 
         // stored + decrypts to exactly the granted bytes; reason recorded

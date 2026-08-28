@@ -5,8 +5,10 @@ use crate::paths;
 use crate::store::Vault;
 
 pub fn cmd_link(env_var: String, alias: String) -> Result<()> {
-    if env_var.is_empty() || env_var.contains('=') || env_var.contains(char::is_whitespace) {
-        bail!("'{env_var}' is not a valid environment variable name");
+    // Restrict to a real env-var identifier so nothing (e.g. a quote) can be
+    // injected into envault.toml. (L5)
+    if !crate::manifest::is_valid_env_var(&env_var) {
+        bail!("'{env_var}' is not a valid environment variable name (use A-Z, 0-9, _; not starting with a digit)");
     }
     let vault = Vault::load(&paths::envault_home())?;
     if vault.get(&alias).is_none() {

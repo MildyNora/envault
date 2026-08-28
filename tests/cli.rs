@@ -361,6 +361,12 @@ mod mock_cdp {
 fn fill_types_secret_into_browser_without_printing_it() {
     let te = TestEnv::new();
     te.init();
+    // fill is opt-in now (H1); enable it via the config file (debug build reads it)
+    std::fs::write(
+        te.home.path().join("config.json"),
+        r#"{"audit_log":false,"touch_id":false,"fill":true}"#,
+    )
+    .unwrap();
     te.envault()
         .args([
             "add",
@@ -401,9 +407,51 @@ fn fill_types_secret_into_browser_without_printing_it() {
 }
 
 #[test]
+fn fill_disabled_by_default_refuses() {
+    let te = TestEnv::new();
+    te.init();
+    te.envault()
+        .args(["add", "k", "--url", "https://example.com", "--stdin"])
+        .write_stdin("v\n")
+        .assert()
+        .success();
+    te.envault()
+        .args(["fill", "k", "--cdp", "http://127.0.0.1:9222"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("disabled"));
+}
+
+#[test]
+fn fill_refuses_non_loopback_cdp() {
+    let te = TestEnv::new();
+    te.init();
+    std::fs::write(
+        te.home.path().join("config.json"),
+        r#"{"audit_log":false,"touch_id":false,"fill":true}"#,
+    )
+    .unwrap();
+    te.envault()
+        .args(["add", "k", "--url", "https://example.com", "--stdin"])
+        .write_stdin("v\n")
+        .assert()
+        .success();
+    te.envault()
+        .args(["fill", "k", "--cdp", "http://10.0.0.9:9222"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("loopback"));
+}
+
+#[test]
 fn fill_refuses_on_host_mismatch() {
     let te = TestEnv::new();
     te.init();
+    std::fs::write(
+        te.home.path().join("config.json"),
+        r#"{"audit_log":false,"touch_id":false,"fill":true}"#,
+    )
+    .unwrap();
     te.envault()
         .args([
             "add",

@@ -28,8 +28,19 @@ use std::str::FromStr;
 const KEYCHAIN_SERVICE: &str = "envault";
 const KEYCHAIN_ACCOUNT: &str = "age-identity";
 
+/// Test-only escape hatch to store the identity in a file instead of the
+/// Keychain. Honored ONLY in debug/test builds; a release binary (what
+/// `cargo install` produces) ignores it, so a malicious agent cannot redirect
+/// the private key to an attacker-named plaintext file. (H5)
 fn identity_file_override() -> Option<std::path::PathBuf> {
-    std::env::var("ENVAULT_IDENTITY_FILE").ok().map(Into::into)
+    #[cfg(debug_assertions)]
+    {
+        std::env::var("ENVAULT_IDENTITY_FILE").ok().map(Into::into)
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        None
+    }
 }
 
 pub fn store_identity(identity: &age::x25519::Identity, _home: &Path) -> Result<()> {
@@ -101,6 +112,22 @@ pub fn load_recipient(home: &Path) -> Result<age::x25519::Recipient> {
         .map_err(|e| anyhow::anyhow!("invalid recipient: {e}"))
 }
 
+/// The recipient to encrypt to, derived from the authoritative Keychain
+/// identity rather than the on-disk `recipient.txt`. Use this on every encrypt
+/// path so a tampered `recipient.txt` or an agent-chosen `ENVAULT_HOME` cannot
+/// reseal secrets to an attacker's key. (H2, H3)
+pub fn recipient_from_identity() -> Result<age::x25519::Recipient> {
+    Ok(load_identity()?.to_public())
+}
+
+/// Serializes the handful of unit tests that mutate the process-wide
+/// `ENVAULT_IDENTITY_FILE` env var, so they don't race under parallel `cargo test`.
+#[cfg(test)]
+pub(crate) fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
+    static L: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    L.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -132,9 +159,9 @@ mod tests {
 
     #[test]
     fn identity_file_roundtrip() {
+        let _guard = test_env_lock();
         let dir = tempfile::TempDir::new().unwrap();
         let id_path = dir.path().join("identity.txt");
-        // Only unit test that mutates process env; keep it that way to stay parallel-safe.
         std::env::set_var("ENVAULT_IDENTITY_FILE", &id_path);
         let id = generate_identity();
         store_identity(&id, dir.path()).unwrap();

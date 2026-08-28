@@ -1,6 +1,6 @@
 [package]
 name = "envault"
-version = "0.5.2"
+version = "0.6.0"
 edition = "2021"
 description = "Local secrets vault for agentic coding: agents see aliases and ciphers, never plaintext"
 license = "MIT"
@@ -15,6 +15,7 @@ clap = { version = "4", features = ["derive"] }
 crossterm = "0.28"
 dirs = "5"
 dotenvy = "0.15"
+hmac = "0.12"
 portable-pty = "0.8"
 ratatui = "0.29"
 robius-authentication = "0.3.1"

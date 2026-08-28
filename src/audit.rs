@@ -1,14 +1,20 @@
-//! Lightweight, hash-chained audit log of every decryption.
+//! Lightweight, HMAC-chained audit log of every decryption.
 //!
-//! Design goals: cheap (one line appended per event, no daemon), small
-//! (auto-trimmed to a size cap), and tamper-evident (each entry carries the
-//! previous entry's hash, so deletion or edits break the chain and show up in
-//! `verify`). It does not *prevent* misuse — it makes access visible.
+//! Cheap (one appended line per event, no daemon), small (auto-trimmed to a
+//! size cap), and tamper-evident: each entry carries an HMAC — keyed by the
+//! Keychain-protected identity — over its fields and the previous entry's MAC,
+//! and a separate MAC'd "head" anchor records the entry count + last MAC so
+//! truncation/deletion is detectable too. An adversary who cannot read the
+//! Keychain identity cannot forge, edit, or silently trim the log. It makes
+//! access visible; it does not prevent it.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use sha2::Sha256;
 use std::path::{Path, PathBuf};
+
+type HmacSha256 = Hmac<Sha256>;
 
 /// Keep the log tiny — trim to the most recent entries once it passes this.
 const MAX_BYTES: u64 = 256 * 1024;
@@ -16,26 +22,44 @@ const MAX_BYTES: u64 = 256 * 1024;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Entry {
     pub ts: String,
-    pub action: String, // run | reveal | copy | fill | rotate
-    pub detail: String, // the command run, or the alias accessed
-    pub prev: String,   // hex hash of the previous entry ("" for the first)
-    pub hash: String,   // hex hash of this entry's (ts, action, detail, prev)
+    pub action: String,
+    pub detail: String,
+    pub prev: String, // hex MAC of the previous entry ("" for the first kept)
+    pub hash: String, // hex HMAC of this entry's (ts, action, detail, prev)
 }
 
 fn log_file(home: &Path) -> PathBuf {
     home.join("audit.log")
 }
+fn head_file(home: &Path) -> PathBuf {
+    home.join("audit.head")
+}
 
-fn hash_entry(ts: &str, action: &str, detail: &str, prev: &str) -> String {
-    let mut h = Sha256::new();
-    h.update(ts.as_bytes());
-    h.update([0]);
-    h.update(action.as_bytes());
-    h.update([0]);
-    h.update(detail.as_bytes());
-    h.update([0]);
-    h.update(prev.as_bytes());
-    hex(&h.finalize())
+fn mac(key: &[u8], parts: &[&[u8]]) -> String {
+    let mut m = HmacSha256::new_from_slice(key).expect("hmac accepts any key length");
+    for (i, p) in parts.iter().enumerate() {
+        if i > 0 {
+            m.update(&[0]);
+        }
+        m.update(p);
+    }
+    hex(&m.finalize().into_bytes())
+}
+
+fn entry_mac(key: &[u8], ts: &str, action: &str, detail: &str, prev: &str) -> String {
+    mac(
+        key,
+        &[
+            ts.as_bytes(),
+            action.as_bytes(),
+            detail.as_bytes(),
+            prev.as_bytes(),
+        ],
+    )
+}
+
+fn head_mac(key: &[u8], count: usize, last: &str) -> String {
+    mac(key, &[count.to_string().as_bytes(), last.as_bytes()])
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -46,58 +70,65 @@ fn hex(bytes: &[u8]) -> String {
     s
 }
 
-/// Append an event. Best-effort: a logging failure must never break the
-/// operation being logged, so errors are swallowed by the caller.
-pub fn record(home: &Path, action: &str, detail: &str) -> Result<()> {
+/// Append an event, keyed by `key` (the identity's secret bytes). Returns Err
+/// on any I/O failure so the caller can fail closed when auditing is required.
+pub fn record(home: &Path, key: &[u8], action: &str, detail: &str) -> Result<()> {
+    std::fs::create_dir_all(home)?;
     let entries = read(home).unwrap_or_default();
     let prev = entries.last().map(|e| e.hash.clone()).unwrap_or_default();
     let ts = crate::store::now_rfc3339();
-    let hash = hash_entry(&ts, action, detail, &prev);
+    let hash = entry_mac(key, &ts, action, detail, &prev);
     let entry = Entry {
         ts,
         action: action.to_string(),
         detail: detail.to_string(),
         prev,
-        hash,
+        hash: hash.clone(),
     };
 
     let path = log_file(home);
-    std::fs::create_dir_all(home)?;
     let mut line = serde_json::to_string(&entry)?;
     line.push('\n');
-
     use std::io::Write;
     let mut f = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(&path)?;
+        .open(&path)
+        .with_context(|| format!("opening {}", path.display()))?;
     f.write_all(line.as_bytes())?;
     drop(f);
     crate::platform::set_mode(&path, 0o600)?;
 
-    trim(home)?;
+    let new_count = entries.len() + 1;
+    write_head(home, key, new_count, &hash)?;
+    trim(home, key)?;
     Ok(())
 }
 
-/// Trim the oldest lines once the file grows past the cap, keeping the log
-/// small. (The chain's first retained entry then references a dropped one —
-/// that's a normal rotation boundary, distinct from tampering.)
-fn trim(home: &Path) -> Result<()> {
+fn write_head(home: &Path, key: &[u8], count: usize, last: &str) -> Result<()> {
+    let path = head_file(home);
+    std::fs::write(&path, head_mac(key, count, last))?;
+    crate::platform::set_mode(&path, 0o600)?;
+    Ok(())
+}
+
+/// Trim the oldest lines past the cap, re-anchoring the head to the kept set.
+fn trim(home: &Path, key: &[u8]) -> Result<()> {
     let path = log_file(home);
-    let meta = match std::fs::metadata(&path) {
-        Ok(m) => m,
-        Err(_) => return Ok(()),
-    };
-    if meta.len() <= MAX_BYTES {
+    let over = std::fs::metadata(&path)
+        .map(|m| m.len() > MAX_BYTES)
+        .unwrap_or(false);
+    if !over {
         return Ok(());
     }
     let raw = std::fs::read_to_string(&path)?;
-    let lines: Vec<&str> = raw.lines().collect();
-    // drop the oldest half
+    let lines: Vec<&str> = raw.lines().filter(|l| !l.trim().is_empty()).collect();
     let keep = &lines[lines.len() / 2..];
     std::fs::write(&path, format!("{}\n", keep.join("\n")))?;
     crate::platform::set_mode(&path, 0o600)?;
-    Ok(())
+    let entries = read(home).unwrap_or_default();
+    let last = entries.last().map(|e| e.hash.clone()).unwrap_or_default();
+    write_head(home, key, entries.len(), &last)
 }
 
 pub fn read(home: &Path) -> Result<Vec<Entry>> {
@@ -113,21 +144,35 @@ pub fn read(home: &Path) -> Result<Vec<Entry>> {
         .collect())
 }
 
-/// Verify the hash-chain. Returns the index of the first broken entry, if any
-/// (a self-hash mismatch = an edited entry; a prev mismatch = a removed entry).
-/// The first entry after a rotation boundary is allowed to reference an absent
-/// predecessor, so we only flag a break when an entry's own hash is wrong or
-/// its `prev` disagrees with the *present* previous line.
-pub fn first_tamper(entries: &[Entry]) -> Option<usize> {
+#[derive(Debug, PartialEq, Eq)]
+pub enum Integrity {
+    Ok,
+    /// An entry was edited or an interior entry was removed (index given).
+    Broken(usize),
+    /// The head anchor is missing or doesn't match — the log was truncated,
+    /// deleted, or its count altered.
+    HeadMismatch,
+}
+
+/// Verify the chain and the head anchor using `key`.
+pub fn verify(home: &Path, key: &[u8], entries: &[Entry]) -> Integrity {
     for (i, e) in entries.iter().enumerate() {
-        if hash_entry(&e.ts, &e.action, &e.detail, &e.prev) != e.hash {
-            return Some(i); // this entry was edited
+        if entry_mac(key, &e.ts, &e.action, &e.detail, &e.prev) != e.hash {
+            return Integrity::Broken(i);
         }
         if i > 0 && e.prev != entries[i - 1].hash {
-            return Some(i); // an entry between i-1 and i was removed
+            return Integrity::Broken(i);
         }
     }
-    None
+    // Head anchor: catches tail truncation / whole-log deletion.
+    let last = entries.last().map(|e| e.hash.clone()).unwrap_or_default();
+    let expected = head_mac(key, entries.len(), &last);
+    match std::fs::read_to_string(head_file(home)) {
+        Ok(h) if h.trim() == expected => Integrity::Ok,
+        // No head yet AND no entries = a genuinely empty log is fine.
+        Err(_) if entries.is_empty() => Integrity::Ok,
+        _ => Integrity::HeadMismatch,
+    }
 }
 
 #[cfg(test)]
@@ -135,37 +180,64 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    const KEY: &[u8] = b"test-identity-secret-bytes";
+
     #[test]
-    fn records_and_chains() {
+    fn records_and_verifies() {
         let home = TempDir::new().unwrap();
-        record(home.path(), "run", "npm test").unwrap();
-        record(home.path(), "reveal", "openrouter").unwrap();
+        record(home.path(), KEY, "run", "npm test").unwrap();
+        record(home.path(), KEY, "reveal", "openrouter").unwrap();
         let entries = read(home.path()).unwrap();
         assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].prev, ""); // first has no predecessor
-        assert_eq!(entries[1].prev, entries[0].hash); // chained
-        assert_eq!(first_tamper(&entries), None); // intact
+        assert_eq!(entries[1].prev, entries[0].hash);
+        assert_eq!(verify(home.path(), KEY, &entries), Integrity::Ok);
     }
 
     #[test]
-    fn detects_edited_entry() {
+    fn detects_edit() {
         let home = TempDir::new().unwrap();
-        record(home.path(), "run", "a").unwrap();
-        record(home.path(), "run", "b").unwrap();
+        record(home.path(), KEY, "run", "a").unwrap();
+        record(home.path(), KEY, "run", "b").unwrap();
         let mut entries = read(home.path()).unwrap();
-        entries[0].detail = "TAMPERED".into(); // edit content, keep old hash
-        assert_eq!(first_tamper(&entries), Some(0));
+        entries[0].detail = "TAMPERED".into();
+        assert_eq!(verify(home.path(), KEY, &entries), Integrity::Broken(0));
     }
 
     #[test]
-    fn detects_removed_entry() {
+    fn detects_interior_deletion() {
         let home = TempDir::new().unwrap();
-        record(home.path(), "run", "a").unwrap();
-        record(home.path(), "run", "b").unwrap();
-        record(home.path(), "run", "c").unwrap();
+        for d in ["a", "b", "c"] {
+            record(home.path(), KEY, "run", d).unwrap();
+        }
         let mut entries = read(home.path()).unwrap();
-        entries.remove(1); // drop the middle entry
-                           // now entries[1].prev points at entries[0]'s... no, at the removed one
-        assert_eq!(first_tamper(&entries), Some(1));
+        entries.remove(1);
+        assert_eq!(verify(home.path(), KEY, &entries), Integrity::Broken(1));
+    }
+
+    #[test]
+    fn detects_tail_truncation_via_head_anchor() {
+        let home = TempDir::new().unwrap();
+        for d in ["a", "b", "c"] {
+            record(home.path(), KEY, "run", d).unwrap();
+        }
+        // delete the last line but leave a valid-looking chain
+        let raw = std::fs::read_to_string(log_file(home.path())).unwrap();
+        let kept: Vec<&str> = raw.lines().take(2).collect();
+        std::fs::write(log_file(home.path()), format!("{}\n", kept.join("\n"))).unwrap();
+        let entries = read(home.path()).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(verify(home.path(), KEY, &entries), Integrity::HeadMismatch);
+    }
+
+    #[test]
+    fn cannot_forge_without_key() {
+        let home = TempDir::new().unwrap();
+        record(home.path(), KEY, "run", "a").unwrap();
+        let entries = read(home.path()).unwrap();
+        // an attacker who guesses the algorithm but not the key can't verify
+        assert_eq!(
+            verify(home.path(), b"wrong-key", &entries),
+            Integrity::Broken(0)
+        );
     }
 }
