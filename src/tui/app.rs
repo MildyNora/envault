@@ -1,0 +1,849 @@
+use crossterm::event::{KeyCode, KeyEvent};
+
+use crate::crypto::encrypt_value;
+use crate::store::{is_valid_alias, now_rfc3339, SecretEntry, Vault};
+
+/// Form field order: the two essentials first, optional annotations below.
+pub const FIELD_NAMES: [&str; 5] = ["name", "value", "label", "url", "notes"];
+const NAME: usize = 0;
+const VALUE: usize = 1;
+const LABEL: usize = 2;
+const URL: usize = 3;
+const NOTES: usize = 4;
+
+/// One-line "what is this field" help, shown under the form as you move focus.
+pub const FIELD_HELP: [&str; 5] = [
+    "permanent identifier agents use — locked once created, cannot be renamed",
+    "the secret itself — encrypted at rest, never shown to agents",
+    "optional human label shown in the dashboard",
+    "optional — restricts `envault fill` to this page host (anti-phishing)",
+    "optional free-text notes",
+];
+
+/// Typable `:` commands: (name, description). Also drives the palette list.
+pub const COMMANDS: [(&str, &str); 5] = [
+    ("rotate", "re-key the vault · revokes Keychain grants"),
+    ("help", "keys, commands & the security boundary"),
+    ("quit", "exit the dashboard"),
+    ("audit", "turn the audit log on/off"),
+    ("touchid", "turn the Touch ID gate on/off"),
+];
+
+/// Indices into COMMANDS whose name starts with `input` (empty input = all).
+pub fn command_matches(input: &str) -> Vec<usize> {
+    let q = input.trim().to_lowercase();
+    COMMANDS
+        .iter()
+        .enumerate()
+        .filter(|(_, (name, _))| q.is_empty() || name.starts_with(&q))
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// The `:` command line plus which palette row is highlighted.
+#[derive(Debug, Clone, Default)]
+pub struct CommandLine {
+    pub input: String,
+    pub sel: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct Form {
+    pub fields: [String; 5],
+    pub focus: usize,
+    pub editing_alias: Option<String>,
+}
+
+#[derive(Debug)]
+pub enum Mode {
+    List,
+    Search,
+    Add(Form),
+    Edit(Form),
+    ConfirmDelete,
+    ConfirmRotate,
+    Reveal(String),
+    Command(CommandLine),
+    Help,
+}
+
+#[derive(Debug)]
+pub enum Effect {
+    Save,
+    Decrypt { alias: String },
+    Copy { alias: String },
+    Rotate,
+    ToggleAudit,
+    ToggleTouchId,
+    Quit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusKind {
+    Info,
+    Success,
+    Error,
+}
+
+pub struct App {
+    pub vault: Vault,
+    pub recipient: age::x25519::Recipient,
+    pub query: String,
+    pub selected: usize,
+    pub mode: Mode,
+    pub status: String,
+    pub status_kind: StatusKind,
+    /// Cached settings for display; the runtime keeps this in sync with disk.
+    pub settings: crate::settings::Settings,
+}
+
+impl App {
+    pub fn new(vault: Vault, recipient: age::x25519::Recipient) -> App {
+        App {
+            vault,
+            recipient,
+            query: String::new(),
+            selected: 0,
+            mode: Mode::List,
+            status: String::new(),
+            status_kind: StatusKind::Info,
+            settings: crate::settings::Settings::default(),
+        }
+    }
+
+    pub fn set_info(&mut self, msg: impl Into<String>) {
+        self.status = msg.into();
+        self.status_kind = StatusKind::Info;
+    }
+
+    pub fn set_success(&mut self, msg: impl Into<String>) {
+        self.status = msg.into();
+        self.status_kind = StatusKind::Success;
+    }
+
+    pub fn set_error(&mut self, msg: impl Into<String>) {
+        self.status = msg.into();
+        self.status_kind = StatusKind::Error;
+    }
+
+    pub fn visible(&self) -> Vec<&SecretEntry> {
+        let q = self.query.to_lowercase();
+        self.vault
+            .secrets
+            .iter()
+            .filter(|s| {
+                q.is_empty()
+                    || s.alias.to_lowercase().contains(&q)
+                    || s.label.to_lowercase().contains(&q)
+            })
+            .collect()
+    }
+
+    pub fn selected_alias(&self) -> Option<String> {
+        self.visible().get(self.selected).map(|e| e.alias.clone())
+    }
+
+    fn clamp_selection(&mut self) {
+        // the add row (index == len) is a valid landing spot
+        let max = self.visible().len();
+        if self.selected > max {
+            self.selected = max;
+        }
+    }
+
+    pub fn provide_plaintext(&mut self, value: String) {
+        self.mode = Mode::Reveal(value);
+    }
+
+    /// Swap in a vault reloaded from disk (e.g. after an external change like a
+    /// granted request), keeping the selection in range. The recipient is
+    /// unchanged — external writers encrypt to the same public key.
+    pub fn reload_vault(&mut self, vault: Vault) {
+        self.vault = vault;
+        self.clamp_selection();
+    }
+
+    /// Runtime callback after a successful `Effect::Rotate`.
+    pub fn after_rotate(&mut self, count: usize, vault: Vault, recipient: age::x25519::Recipient) {
+        self.vault = vault;
+        self.recipient = recipient;
+        self.clamp_selection();
+        self.set_success(format!(
+            "rotated {count} secret(s) · re-grant Always Allow on next use"
+        ));
+    }
+
+    pub fn handle_key(&mut self, key: KeyEvent) -> Option<Effect> {
+        match std::mem::replace(&mut self.mode, Mode::List) {
+            Mode::List => self.on_list_key(key),
+            Mode::Search => {
+                self.on_search_key(key);
+                None
+            }
+            Mode::Reveal(_) => None, // any key returns to List
+            Mode::Help => None,      // any key returns to List
+            Mode::ConfirmDelete => self.on_confirm_delete(key),
+            Mode::ConfirmRotate => self.on_confirm_rotate(key),
+            Mode::Command(input) => self.on_command_key(key, input),
+            Mode::Add(form) => self.on_form_key(key, form, false),
+            Mode::Edit(form) => self.on_form_key(key, form, true),
+        }
+    }
+
+    /// Index of the phantom "＋ add" row — one past the last secret.
+    pub fn add_row_index(&self) -> usize {
+        self.visible().len()
+    }
+
+    /// True when the selection is on the phantom add row, not a secret.
+    pub fn on_add_row(&self) -> bool {
+        self.selected >= self.add_row_index()
+    }
+
+    fn open_add(&mut self) {
+        self.mode = Mode::Add(Form {
+            fields: Default::default(),
+            focus: NAME,
+            editing_alias: None,
+        });
+    }
+
+    fn open_edit(&mut self, alias: &str) {
+        let e = self.vault.get(alias).expect("selected exists");
+        self.mode = Mode::Edit(Form {
+            fields: [
+                e.alias.clone(),
+                String::new(), // empty value keeps the old cipher
+                e.label.clone(),
+                e.url.clone().unwrap_or_default(),
+                e.notes.clone(),
+            ],
+            focus: VALUE, // name is locked; start on value
+            editing_alias: Some(alias.to_string()),
+        });
+    }
+
+    fn on_list_key(&mut self, key: KeyEvent) -> Option<Effect> {
+        self.mode = Mode::List;
+        match key.code {
+            KeyCode::Char('q') | KeyCode::Esc => return Some(Effect::Quit),
+            KeyCode::Char('j') | KeyCode::Down => {
+                // stop on the add row (index == len), never past it
+                if self.selected < self.add_row_index() {
+                    self.selected += 1;
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.selected = self.selected.saturating_sub(1);
+            }
+            KeyCode::Char('/') => {
+                self.query.clear();
+                self.mode = Mode::Search;
+            }
+            KeyCode::Char('?') => {
+                self.mode = Mode::Help;
+            }
+            KeyCode::Char(':') => {
+                self.mode = Mode::Command(CommandLine::default());
+            }
+            KeyCode::Char('a') => self.open_add(),
+            // Enter / → activate the highlighted row: edit a secret, or add.
+            KeyCode::Enter | KeyCode::Right => match self.selected_alias() {
+                Some(alias) => self.open_edit(&alias),
+                None => self.open_add(),
+            },
+            KeyCode::Char('e') => {
+                if let Some(alias) = self.selected_alias() {
+                    self.open_edit(&alias);
+                }
+            }
+            KeyCode::Char('d') => {
+                if self.selected_alias().is_some() {
+                    self.mode = Mode::ConfirmDelete;
+                }
+            }
+            KeyCode::Char('r') => {
+                if let Some(alias) = self.selected_alias() {
+                    return Some(Effect::Decrypt { alias });
+                }
+            }
+            KeyCode::Char('c') => {
+                if let Some(alias) = self.selected_alias() {
+                    return Some(Effect::Copy { alias });
+                }
+            }
+            KeyCode::Char(c) if ('1'..='9').contains(&c) => {
+                let idx = (c as usize) - ('1' as usize);
+                if idx < self.visible().len() {
+                    self.selected = idx;
+                }
+            }
+            _ => {}
+        }
+        None
+    }
+
+    fn on_search_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Enter => {
+                self.mode = Mode::List;
+                self.selected = 0;
+                self.clamp_selection();
+            }
+            KeyCode::Esc => {
+                self.query.clear();
+                self.mode = Mode::List;
+                self.clamp_selection();
+            }
+            KeyCode::Backspace => {
+                self.query.pop();
+                self.mode = Mode::Search;
+            }
+            KeyCode::Char(c) => {
+                self.query.push(c);
+                self.mode = Mode::Search;
+            }
+            _ => self.mode = Mode::Search,
+        }
+    }
+
+    fn on_confirm_delete(&mut self, key: KeyEvent) -> Option<Effect> {
+        self.mode = Mode::List;
+        if let KeyCode::Char('y') = key.code {
+            if let Some(alias) = self.selected_alias() {
+                self.vault.secrets.retain(|s| s.alias != alias);
+                self.clamp_selection();
+                self.set_success(format!("deleted '{alias}'"));
+                return Some(Effect::Save);
+            }
+        }
+        None
+    }
+
+    fn on_confirm_rotate(&mut self, key: KeyEvent) -> Option<Effect> {
+        self.mode = Mode::List;
+        if let KeyCode::Char('y') = key.code {
+            self.set_info("rotating keypair…");
+            return Some(Effect::Rotate);
+        }
+        self.set_info("cancelled");
+        None
+    }
+
+    fn on_command_key(&mut self, key: KeyEvent, mut cl: CommandLine) -> Option<Effect> {
+        let matches = command_matches(&cl.input);
+        match key.code {
+            KeyCode::Esc => {
+                self.mode = Mode::List;
+            }
+            KeyCode::Up => {
+                cl.sel = cl.sel.saturating_sub(1);
+                self.mode = Mode::Command(cl);
+            }
+            KeyCode::Down => {
+                if !matches.is_empty() {
+                    cl.sel = (cl.sel + 1).min(matches.len() - 1);
+                }
+                self.mode = Mode::Command(cl);
+            }
+            KeyCode::Tab => {
+                // autocomplete the input to the highlighted command
+                if let Some(&idx) = matches.get(cl.sel) {
+                    cl.input = COMMANDS[idx].0.to_string();
+                    cl.sel = 0;
+                }
+                self.mode = Mode::Command(cl);
+            }
+            KeyCode::Enter => {
+                self.mode = Mode::List;
+                // exact typed match wins; otherwise run the highlighted row
+                let typed = cl.input.trim().to_lowercase();
+                let target = if COMMANDS.iter().any(|(n, _)| *n == typed) {
+                    Some(typed)
+                } else {
+                    matches.get(cl.sel).map(|&idx| COMMANDS[idx].0.to_string())
+                };
+                return match target {
+                    Some(cmd) => self.run_command(&cmd),
+                    None => {
+                        self.set_error(format!("unknown command: {}", cl.input.trim()));
+                        None
+                    }
+                };
+            }
+            KeyCode::Backspace => {
+                if cl.input.pop().is_none() {
+                    self.mode = Mode::List; // backspace on empty exits
+                } else {
+                    cl.sel = 0;
+                    self.mode = Mode::Command(cl);
+                }
+            }
+            KeyCode::Char(c) => {
+                cl.input.push(c);
+                cl.sel = 0;
+                self.mode = Mode::Command(cl);
+            }
+            _ => self.mode = Mode::Command(cl),
+        }
+        None
+    }
+
+    fn run_command(&mut self, cmd: &str) -> Option<Effect> {
+        match cmd {
+            "" => {}
+            "rotate" => self.mode = Mode::ConfirmRotate,
+            "help" | "?" => self.mode = Mode::Help,
+            "audit" => return Some(Effect::ToggleAudit),
+            "touchid" | "touch-id" => return Some(Effect::ToggleTouchId),
+            "q" | "quit" | "exit" => return Some(Effect::Quit),
+            other => {
+                self.set_error(format!("unknown command: {other}"));
+            }
+        }
+        None
+    }
+
+    fn on_form_key(&mut self, key: KeyEvent, mut form: Form, editing: bool) -> Option<Effect> {
+        match key.code {
+            KeyCode::Esc => {
+                self.mode = Mode::List;
+                self.set_info("cancelled");
+                return None;
+            }
+            KeyCode::Tab | KeyCode::Down => {
+                form.focus = (form.focus + 1) % form.fields.len();
+                if editing && form.focus == NAME {
+                    form.focus = VALUE;
+                }
+            }
+            KeyCode::BackTab | KeyCode::Up => {
+                form.focus = (form.focus + form.fields.len() - 1) % form.fields.len();
+                if editing && form.focus == NAME {
+                    form.focus = form.fields.len() - 1;
+                }
+            }
+            KeyCode::Backspace => {
+                form.fields[form.focus].pop();
+            }
+            KeyCode::Char(c) => {
+                form.fields[form.focus].push(c);
+            }
+            KeyCode::Enter => return self.submit_form(form, editing),
+            _ => {}
+        }
+        self.mode = if editing {
+            Mode::Edit(form)
+        } else {
+            Mode::Add(form)
+        };
+        None
+    }
+
+    fn submit_form(&mut self, form: Form, editing: bool) -> Option<Effect> {
+        let name = form.fields[NAME].clone();
+        let value = form.fields[VALUE].clone();
+        let label = form.fields[LABEL].clone();
+        let url = form.fields[URL].clone();
+        let notes = form.fields[NOTES].clone();
+        if editing {
+            let target = form.editing_alias.clone().expect("edit has name");
+            let cipher = if value.is_empty() {
+                None
+            } else {
+                match encrypt_value(&self.recipient, &value) {
+                    Ok(c) => Some(c),
+                    Err(e) => {
+                        self.set_error(format!("encryption failed: {e}"));
+                        self.mode = Mode::Edit(form);
+                        return None;
+                    }
+                }
+            };
+            if let Some(entry) = self.vault.secrets.iter_mut().find(|s| s.alias == target) {
+                entry.label = if label.is_empty() {
+                    target.clone()
+                } else {
+                    label
+                };
+                entry.url = if url.is_empty() { None } else { Some(url) };
+                entry.notes = notes;
+                if let Some(c) = cipher {
+                    entry.cipher = c;
+                }
+                entry.updated_at = now_rfc3339();
+            }
+            self.set_success(format!("updated '{target}'"));
+            self.mode = Mode::List;
+            return Some(Effect::Save);
+        }
+        // Add
+        if !is_valid_alias(&name) {
+            self.set_error("name must be kebab-case: lowercase letters, digits, '-'");
+            self.mode = Mode::Add(form);
+            return None;
+        }
+        if self.vault.get(&name).is_some() {
+            self.set_error(format!("name '{name}' already exists"));
+            self.mode = Mode::Add(form);
+            return None;
+        }
+        if value.is_empty() {
+            self.set_error("value must not be empty");
+            self.mode = Mode::Add(form);
+            return None;
+        }
+        let cipher = match encrypt_value(&self.recipient, &value) {
+            Ok(c) => c,
+            Err(e) => {
+                self.set_error(format!("encryption failed: {e}"));
+                self.mode = Mode::Add(form);
+                return None;
+            }
+        };
+        let now = now_rfc3339();
+        self.vault
+            .insert(SecretEntry {
+                label: if label.is_empty() {
+                    name.clone()
+                } else {
+                    label
+                },
+                alias: name.clone(),
+                cipher,
+                url: if url.is_empty() { None } else { Some(url) },
+                created_at: now.clone(),
+                updated_at: now,
+                notes,
+            })
+            .ok();
+        self.set_success(format!("added '{name}'"));
+        self.mode = Mode::List;
+        Some(Effect::Save)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crypto::{decrypt_value, encrypt_value, generate_identity};
+    use crate::store::{SecretEntry, Vault};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+    fn ch(c: char) -> KeyEvent {
+        key(KeyCode::Char(c))
+    }
+    fn type_str(app: &mut App, s: &str) {
+        for c in s.chars() {
+            app.handle_key(ch(c));
+        }
+    }
+
+    fn entry(alias: &str, recipient: &age::x25519::Recipient) -> SecretEntry {
+        SecretEntry {
+            alias: alias.into(),
+            label: format!("{alias} label"),
+            cipher: encrypt_value(recipient, "old-value-123").unwrap(),
+            url: None,
+            created_at: crate::store::now_rfc3339(),
+            updated_at: crate::store::now_rfc3339(),
+            notes: String::new(),
+        }
+    }
+
+    fn app_with(aliases: &[&str]) -> (App, age::x25519::Identity) {
+        let id = generate_identity();
+        let recipient = id.to_public();
+        let mut vault = Vault::default();
+        for a in aliases {
+            vault.insert(entry(a, &recipient)).unwrap();
+        }
+        (App::new(vault, recipient), id)
+    }
+
+    #[test]
+    fn navigation_moves_selection() {
+        let (mut app, _) = app_with(&["a-key", "b-key", "c-key"]);
+        assert_eq!(app.selected_alias().as_deref(), Some("a-key"));
+        app.handle_key(ch('j'));
+        assert_eq!(app.selected_alias().as_deref(), Some("b-key"));
+        app.handle_key(ch('k'));
+        assert_eq!(app.selected_alias().as_deref(), Some("a-key"));
+        app.handle_key(ch('k')); // clamped at top
+        assert_eq!(app.selected_alias().as_deref(), Some("a-key"));
+    }
+
+    #[test]
+    fn search_filters_visible() {
+        let (mut app, _) = app_with(&["openrouter", "db-password"]);
+        app.handle_key(ch('/'));
+        type_str(&mut app, "open");
+        app.handle_key(key(KeyCode::Enter));
+        let visible: Vec<_> = app.visible().iter().map(|e| e.alias.clone()).collect();
+        assert_eq!(visible, vec!["openrouter"]);
+        assert_eq!(app.selected_alias().as_deref(), Some("openrouter"));
+    }
+
+    #[test]
+    fn reload_vault_swaps_and_clamps_selection() {
+        let (mut app, id) = app_with(&["a-key", "b-key", "c-key"]);
+        app.selected = 3; // on the add row
+        let mut v = Vault::default();
+        v.insert(entry("only", &id.to_public())).unwrap();
+        app.reload_vault(v);
+        assert_eq!(app.vault.secrets.len(), 1);
+        assert_eq!(app.selected, 1, "selection clamped to the new add row");
+        assert_eq!(app.selected_alias(), None); // add row
+    }
+
+    #[test]
+    fn esc_quits_from_list_like_q() {
+        let (mut app, _) = app_with(&["a-key"]);
+        assert!(matches!(
+            app.handle_key(key(KeyCode::Esc)),
+            Some(Effect::Quit)
+        ));
+    }
+
+    #[test]
+    fn quit_reveal_copy_effects() {
+        let (mut app, _) = app_with(&["a-key"]);
+        assert!(matches!(
+            app.handle_key(ch('r')),
+            Some(Effect::Decrypt { .. })
+        ));
+        app.provide_plaintext("old-value-123".into());
+        assert!(matches!(app.mode, Mode::Reveal(ref v) if v == "old-value-123"));
+        app.handle_key(key(KeyCode::Esc)); // any key leaves reveal
+        assert!(matches!(app.mode, Mode::List));
+        assert!(matches!(app.handle_key(ch('c')), Some(Effect::Copy { .. })));
+        assert!(matches!(app.handle_key(ch('q')), Some(Effect::Quit)));
+    }
+
+    #[test]
+    fn add_flow_encrypts_and_saves() {
+        let (mut app, id) = app_with(&[]);
+        app.handle_key(ch('a'));
+        type_str(&mut app, "new-key"); // name field (0)
+        app.handle_key(key(KeyCode::Tab)); // value (1)
+        type_str(&mut app, "fresh-value-77");
+        app.handle_key(key(KeyCode::Tab)); // label (2)
+        type_str(&mut app, "New Key");
+        let eff = app.handle_key(key(KeyCode::Enter));
+        assert!(matches!(eff, Some(Effect::Save)));
+        let entry = app.vault.get("new-key").expect("entry added");
+        assert_eq!(entry.label, "New Key");
+        assert_eq!(decrypt_value(&id, &entry.cipher).unwrap(), "fresh-value-77");
+    }
+
+    #[test]
+    fn add_rejects_bad_alias_and_empty_value() {
+        let (mut app, _) = app_with(&[]);
+        app.handle_key(ch('a'));
+        type_str(&mut app, "Bad Alias");
+        assert!(app.handle_key(key(KeyCode::Enter)).is_none());
+        assert!(matches!(app.mode, Mode::Add(_)), "stays in form");
+        assert!(app.status.contains("kebab-case"), "status: {}", app.status);
+    }
+
+    #[test]
+    fn edit_keeps_cipher_when_value_empty() {
+        let (mut app, id) = app_with(&["a-key"]);
+        let old_cipher = app.vault.get("a-key").unwrap().cipher.clone();
+        app.handle_key(ch('e'));
+        // edit form opens focused on value (1); name is locked
+        app.handle_key(key(KeyCode::Tab)); // label (2)
+        type_str(&mut app, "!"); // append to label
+        let eff = app.handle_key(key(KeyCode::Enter));
+        assert!(matches!(eff, Some(Effect::Save)));
+        let entry = app.vault.get("a-key").unwrap();
+        assert_eq!(entry.cipher, old_cipher);
+        assert!(entry.label.ends_with('!'));
+        assert_eq!(decrypt_value(&id, &entry.cipher).unwrap(), "old-value-123");
+    }
+
+    #[test]
+    fn edit_never_reaches_locked_name_field() {
+        let (mut app, _) = app_with(&["a-key"]);
+        app.handle_key(ch('e'));
+        // BackTab from value (1) wraps to notes (4), skipping name (0)
+        app.handle_key(key(KeyCode::BackTab));
+        let Mode::Edit(form) = &app.mode else {
+            panic!("expected edit mode")
+        };
+        assert_eq!(form.focus, 4);
+        // Tab from notes (4) skips name (0) and lands on value (1)
+        app.handle_key(key(KeyCode::Tab));
+        let Mode::Edit(form) = &app.mode else {
+            panic!("expected edit mode")
+        };
+        assert_eq!(form.focus, 1);
+    }
+
+    #[test]
+    fn right_arrow_opens_edit_on_a_secret() {
+        let (mut app, _) = app_with(&["a-key"]);
+        app.handle_key(key(KeyCode::Right));
+        assert!(matches!(app.mode, Mode::Edit(_)), "→ opens edit");
+    }
+
+    #[test]
+    fn add_row_sits_below_last_and_activates_add() {
+        let (mut app, _) = app_with(&["a-key", "b-key"]);
+        // down past the last secret lands on the phantom "add" row
+        app.handle_key(ch('j'));
+        app.handle_key(ch('j'));
+        assert_eq!(app.selected, 2, "add row is index == len");
+        assert!(app.selected_alias().is_none(), "add row is not a secret");
+        // Enter (or →) on the add row opens the add form
+        app.handle_key(key(KeyCode::Enter));
+        assert!(matches!(app.mode, Mode::Add(_)), "Enter on add row adds");
+    }
+
+    #[test]
+    fn add_row_is_the_only_row_when_empty() {
+        let (mut app, _) = app_with(&[]);
+        assert_eq!(app.selected, 0);
+        assert!(app.selected_alias().is_none());
+        app.handle_key(key(KeyCode::Right));
+        assert!(matches!(app.mode, Mode::Add(_)), "→ on empty adds");
+    }
+
+    #[test]
+    fn enter_on_a_secret_opens_edit() {
+        let (mut app, _) = app_with(&["a-key"]);
+        app.handle_key(key(KeyCode::Enter));
+        assert!(matches!(app.mode, Mode::Edit(_)));
+    }
+
+    #[test]
+    fn number_keys_jump_selection() {
+        let (mut app, _) = app_with(&["a-key", "b-key", "c-key"]);
+        app.handle_key(ch('3'));
+        assert_eq!(app.selected_alias().as_deref(), Some("c-key"));
+        app.handle_key(ch('1'));
+        assert_eq!(app.selected_alias().as_deref(), Some("a-key"));
+        app.handle_key(ch('9')); // out of range: no move
+        assert_eq!(app.selected_alias().as_deref(), Some("a-key"));
+    }
+
+    #[test]
+    fn help_opens_and_any_key_closes() {
+        let (mut app, _) = app_with(&["a-key"]);
+        app.handle_key(ch('?'));
+        assert!(matches!(app.mode, Mode::Help));
+        app.handle_key(ch('x'));
+        assert!(matches!(app.mode, Mode::List));
+    }
+
+    #[test]
+    fn command_mode_rotate_flow() {
+        let (mut app, _) = app_with(&["a-key"]);
+        app.handle_key(ch(':'));
+        type_str(&mut app, "rotate");
+        assert!(app.handle_key(key(KeyCode::Enter)).is_none());
+        assert!(matches!(app.mode, Mode::ConfirmRotate));
+        let eff = app.handle_key(ch('y'));
+        assert!(matches!(eff, Some(Effect::Rotate)));
+
+        // 'n' cancels the confirm
+        app.handle_key(ch(':'));
+        type_str(&mut app, "rotate");
+        app.handle_key(key(KeyCode::Enter));
+        assert!(app.handle_key(ch('n')).is_none());
+        assert!(matches!(app.mode, Mode::List));
+    }
+
+    #[test]
+    fn command_palette_filters_and_arrows_select() {
+        let (mut app, _) = app_with(&[]);
+        app.handle_key(ch(':'));
+        type_str(&mut app, "h"); // matches only "help"
+        let matches = command_matches("h");
+        assert_eq!(matches, vec![1]);
+        // Enter with a single match runs it (help)
+        assert!(app.handle_key(key(KeyCode::Enter)).is_none());
+        assert!(matches!(app.mode, Mode::Help));
+    }
+
+    #[test]
+    fn command_palette_enter_runs_highlighted_on_empty_input() {
+        let (mut app, _) = app_with(&[]);
+        app.handle_key(ch(':')); // empty input, sel 0 = rotate
+        assert!(app.handle_key(key(KeyCode::Enter)).is_none());
+        assert!(matches!(app.mode, Mode::ConfirmRotate));
+    }
+
+    #[test]
+    fn command_palette_down_then_enter_picks_second() {
+        let (mut app, _) = app_with(&[]);
+        app.handle_key(ch(':'));
+        app.handle_key(key(KeyCode::Down)); // sel 1 = help
+        assert!(app.handle_key(key(KeyCode::Enter)).is_none());
+        assert!(matches!(app.mode, Mode::Help));
+    }
+
+    #[test]
+    fn command_palette_toggles_settings() {
+        let (mut app, _) = app_with(&[]);
+        app.handle_key(ch(':'));
+        type_str(&mut app, "audit");
+        assert!(matches!(
+            app.handle_key(key(KeyCode::Enter)),
+            Some(Effect::ToggleAudit)
+        ));
+        app.handle_key(ch(':'));
+        type_str(&mut app, "touchid");
+        assert!(matches!(
+            app.handle_key(key(KeyCode::Enter)),
+            Some(Effect::ToggleTouchId)
+        ));
+    }
+
+    #[test]
+    fn command_tab_autocompletes_highlighted() {
+        let (mut app, _) = app_with(&[]);
+        app.handle_key(ch(':'));
+        type_str(&mut app, "q");
+        app.handle_key(key(KeyCode::Tab));
+        let Mode::Command(cl) = &app.mode else {
+            panic!("expected command mode")
+        };
+        assert_eq!(cl.input, "quit");
+    }
+
+    #[test]
+    fn command_mode_quit_unknown_and_escape() {
+        let (mut app, _) = app_with(&[]);
+        app.handle_key(ch(':'));
+        type_str(&mut app, "quit");
+        assert!(matches!(
+            app.handle_key(key(KeyCode::Enter)),
+            Some(Effect::Quit)
+        ));
+
+        app.handle_key(ch(':'));
+        type_str(&mut app, "bogus");
+        assert!(app.handle_key(key(KeyCode::Enter)).is_none());
+        assert!(matches!(app.status_kind, StatusKind::Error));
+        assert!(app.status.contains("unknown command"), "{}", app.status);
+
+        app.handle_key(ch(':'));
+        app.handle_key(key(KeyCode::Esc));
+        assert!(matches!(app.mode, Mode::List));
+    }
+
+    #[test]
+    fn after_rotate_swaps_key_material_and_reports() {
+        let (mut app, _) = app_with(&["a-key"]);
+        let new_id = generate_identity();
+        let new_vault = Vault::default();
+        app.after_rotate(1, new_vault, new_id.to_public());
+        assert!(matches!(app.status_kind, StatusKind::Success));
+        assert!(app.status.contains("rotated 1"), "{}", app.status);
+        assert!(app.vault.secrets.is_empty());
+    }
+}
