@@ -1,0 +1,12 @@
+{
+  "name": "envault",
+  "description": "envault: local secrets vault for agentic coding — agents see aliases and ciphers, never plaintext.",
+  "owner": { "name": "purifido" },
+  "plugins": [
+    {
+      "name": "envault",
+      "source": "./plugin",
+      "description": "Secrets vault workflow for agents: aliases and ciphers only, never plaintext."
+    }
+  ]
+}
