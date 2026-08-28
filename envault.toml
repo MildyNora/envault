@@ -1,2 +1,0 @@
-# envault manifest: ENV_VAR = "vault alias" (names only, no secrets)
-DEEPSEEK_API_KEY = "deepseek"
