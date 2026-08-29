@@ -111,15 +111,43 @@ $ envault run -- npm run deploy
 $ envault
 ```
 
-When an agent needs a secret you haven't stored yet, it doesn't ask you to paste
-one into chat — it requests it, and a small window pops up for you:
+### What it looks like for your agent
+
+Say Claude Code is deploying to Cloudflare and needs `CLOUDFLARE_API_TOKEN`,
+which isn't in your vault yet. It doesn't ask you to paste the token into chat —
+it **requests** it:
 
 ```console
-$ envault request stripe --reason "the deploy needs the live key" --agent "Claude Code"
+$ envault request cloudflare \
+    --reason "deploy Workers — wrangler needs CLOUDFLARE_API_TOKEN" \
+    --agent "Claude Code"
 ```
 
-You paste the value (the agent never sees it) or decline with a note. The agent
-receives only the outcome.
+A small window opens on *your* screen (not in the agent's terminal):
+
+```text
+┌─ envault · a request from Claude Code ────────────────┐
+│  wants    cloudflare                                  │
+│  reason   deploy Workers — wrangler needs             │
+│           CLOUDFLARE_API_TOKEN                         │
+│                                                       │
+│  paste value (hidden)  ·  Enter grant  ·  Esc decline │
+│  ›  ••••••••••••••••••••••••••••                       │
+└───────────────────────────────────────────────────────┘
+```
+
+You paste it once. The agent only ever learns the outcome — `0` granted, `3`
+declined (with your note), or `4`/`5`/`6` for cancelled / timeout / no-window.
+Now it can *use* the token without ever seeing it:
+
+```console
+$ envault link CLOUDFLARE_API_TOKEN cloudflare
+$ envault run -- wrangler deploy
+   [envault:cloudflare]   ← the token, masked wherever it would have printed
+```
+
+Same shape for an Azure client secret, an OpenAI key, or a database URL: the
+agent names what it needs, you hand it over once, and it stays out of the model.
 
 ## Commands
 
