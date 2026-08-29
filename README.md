@@ -141,6 +141,30 @@ receives only the outcome.
 
 ## How it works
 
+Plaintext goes in; only ciphers rest on disk; the private key stays in the
+keychain; and even inside `envault run`, the output is masked:
+
+```mermaid
+flowchart LR
+    H(["You"]) -->|"secret (plaintext)"| ADD["envault add"]
+    KC[["OS keychain<br/>(age private key)"]] -. "public key only" .-> ADD
+    ADD -->|"age-encrypt"| V[("Vault<br/>name → cipher")]
+
+    subgraph RUN["envault run"]
+        direction LR
+        V --> DEC{{"decrypt"}}
+        KC -. "unlock" .-> DEC
+        DEC -->|"as env vars"| CMD["your command"]
+        CMD -->|"stdout / stderr"| MASK{{"mask values"}}
+        MASK --> OUT["terminal / agent"]
+    end
+
+    classDef secret fill:#fde4ec,stroke:#c2185b,color:#000;
+    classDef safe fill:#e3f2fd,stroke:#1976d2,color:#000;
+    class H,DEC,CMD secret;
+    class ADD,V,MASK,OUT safe;
+```
+
 **Data model.** The vault (`~/.envault/vault.json`) is a list of entries — each a
 name plus an [age](https://age-encryption.org)-encrypted cipher. No plaintext is
 stored anywhere in it. The age **private key lives in your OS keychain**, never on
