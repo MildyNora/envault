@@ -13,15 +13,12 @@
 
 ---
 
-envault is a free, local secrets manager built for the age of coding agents. You
-store API keys, tokens, and passwords once; your agent refers to them **by name**
-and runs commands through envault — but the plaintext only ever exists inside the
-process envault launches. It never reaches the model's context, a `.env` file, or
+Envault is a free, local secrets manager built for coding agents. When your agents need secrets
+like API keys, passwords or other credentials, they ask you to store in envault once and give them names.
+Envault encrypts them to ciphers, so no plaintext ever reaches the model's context, a `.env` file, or
 your chat history.
 
-Think of it as a 1Password-style vault whose whole job is to keep secrets out of
-your agent's "brain" while still letting the agent get real work done.
-
+Envault keeps your secret out of models while keeping the work done
 ```console
 $ envault add openrouter --label "OpenRouter API key"
 Value for 'openrouter' (input hidden): ••••••••••••••••
