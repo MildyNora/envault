@@ -175,13 +175,13 @@ keychain; and even inside `envault run`, the output is masked:
 ```mermaid
 flowchart LR
     H(["You"]) -->|"secret (plaintext)"| ADD["envault add"]
-    KC[["OS keychain<br/>(age private key)"]] -. "public key only" .-> ADD
+    KC[["OS keychain<br/>(age private key)"]] -.->|"public key only"| ADD
     ADD -->|"age-encrypt"| V[("Vault<br/>name → cipher")]
 
     subgraph RUN["envault run"]
         direction LR
         V --> DEC{{"decrypt"}}
-        KC -. "unlock" .-> DEC
+        KC -.->|"unlock"| DEC
         DEC -->|"as env vars"| CMD["your command"]
         CMD -->|"stdout / stderr"| MASK{{"mask values"}}
         MASK --> OUT["terminal / agent"]
@@ -220,33 +220,23 @@ a secret; it is **not a sandbox.**
 The trust boundary — what the agent can reach, and what it can't:
 
 ```mermaid
-flowchart TB
-    subgraph HUMAN["🔓 You — trusted"]
-        S["plaintext secret"]
-    end
-    subgraph OSK["🔑 OS keychain — never leaves the device"]
-        PK["age private key"]
-    end
-    subgraph VAULT["📦 Vault on disk"]
-        N["names"]
-        C["age ciphers"]
-    end
-    subgraph AGENT["🤖 Agent — untrusted"]
-        SEES["sees names ✅ and ciphers ✅"]
-        NEVER["never plaintext ❌ or the key ❌"]
-        ASK["envault request"]
-    end
+flowchart LR
+    S["🔓 plaintext secret<br/>(yours, trusted)"]
+    PK["🔑 age private key<br/>(in the OS keychain)"]
+    V[("📦 Vault on disk<br/>names + age ciphers")]
+    A["🤖 Agent — untrusted<br/>✅ sees names + ciphers<br/>❌ never plaintext or the key"]
 
-    S -->|"envault add"| C
-    PK -. "decrypts only inside run / request" .-> C
-    N --> SEES
-    C --> SEES
-    ASK -. "pops a window for you" .-> S
+    S -->|"envault add (encrypt)"| V
+    PK -.->|"decrypts only inside<br/>envault run / request"| V
+    V ==>|"names + ciphers only"| A
+    A -.->|"envault request<br/>(pops a window for you)"| S
 
     classDef trust fill:#e8f5e9,stroke:#2e7d32,color:#000;
     classDef danger fill:#ffebee,stroke:#c62828,color:#000;
+    classDef vault fill:#e3f2fd,stroke:#1976d2,color:#000;
     class S,PK trust;
-    class SEES,NEVER,ASK danger;
+    class A danger;
+    class V vault;
 ```
 
 **✅ envault protects against**
