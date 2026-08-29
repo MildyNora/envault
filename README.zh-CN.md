@@ -25,7 +25,13 @@ API key、token、密码，只要存一次。之后 agent 只认**名字**，命
 
 ## 安装
 
-**直接装预编译好的二进制（不用装 Rust）：**
+**Homebrew（macOS / Linux）：**
+
+```bash
+brew install MildyNora/envault/envault
+```
+
+**或者用免 Rust 的安装脚本** —— 它还会顺手建好密钥库、配好 skill：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/MildyNora/envault/master/install.sh | bash
@@ -35,13 +41,13 @@ curl -fsSL https://raw.githubusercontent.com/MildyNora/envault/master/install.sh
 irm https://raw.githubusercontent.com/MildyNora/envault/master/install.ps1 | iex
 ```
 
-或者**从源码装**（需要 [Rust](https://rustup.rs)）：
+**或者从源码装**（需要 [Rust](https://rustup.rs)）：
 
 ```bash
 git clone https://github.com/MildyNora/envault.git && cd envault && ./install.sh
 ```
 
-以上任意一种，都会装好二进制、建好你的密钥库，并配好 agent skill。macOS、Windows、Linux 都支持；想升级，再跑一遍就行。
+装好后跑一句 **`envault`** 打开 dashboard（首次启动会问你要不要建密钥库）；`envault skill install` 负责给 agent 配置。macOS、Windows、Linux 都支持。
 
 ## 👤 给你：dashboard
 

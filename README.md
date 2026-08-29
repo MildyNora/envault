@@ -32,7 +32,13 @@ your chat history.
 
 ## Install
 
-**Prebuilt binary — no Rust needed:**
+**Homebrew (macOS / Linux):**
+
+```bash
+brew install MildyNora/envault/envault
+```
+
+**Or the no-Rust install script** — it also creates your vault and sets up the skill:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/MildyNora/envault/master/install.sh | bash
@@ -42,14 +48,15 @@ curl -fsSL https://raw.githubusercontent.com/MildyNora/envault/master/install.sh
 irm https://raw.githubusercontent.com/MildyNora/envault/master/install.ps1 | iex
 ```
 
-Or **from source** (needs [Rust](https://rustup.rs)):
+**Or from source** (needs [Rust](https://rustup.rs)):
 
 ```bash
 git clone https://github.com/MildyNora/envault.git && cd envault && ./install.sh
 ```
 
-Any of these installs the binary, creates your vault, and sets up the agent skill.
-Runs on macOS, Windows, and Linux; re-run to upgrade.
+Then run **`envault`** to open the dashboard (it offers to create your vault on
+first launch); `envault skill install` sets up your agents. Works on macOS,
+Windows, and Linux.
 
 ## 👤 For you — the dashboard
 
