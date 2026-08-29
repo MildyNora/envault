@@ -42,6 +42,7 @@ The agent sees `openrouter` and an encrypted blob. It never sees `sk-or-...`.
 ## Contents
 
 - [Why envault](#why-envault)
+- [Scope & the honest boundary](#scope--the-honest-boundary)
 - [Install](#install)
 - [Quick start](#quick-start)
 - [Commands](#commands)
@@ -51,6 +52,7 @@ The agent sees `openrouter` and an encrypted blob. It never sees `sk-or-...`.
 - [Works with your agent](#works-with-your-agent)
 - [Platform support](#platform-support)
 - [Status & limitations](#status--limitations)
+- [Contributing](#contributing)
 - [License](#license)
 
 ---
@@ -69,6 +71,25 @@ The agent sees `openrouter` and an encrypted blob. It never sees `sk-or-...`.
   so an agent can't silently turn them off.
 - **Works across agents.** One Agent Skill teaches Claude Code, Codex, and opencode
   the same names-only workflow — loaded only when a task needs a secret.
+
+## Scope & the honest boundary
+
+envault is for keeping secrets **out of your agent's context and out of your
+files** — the prompt-leak and accidental-exposure threat. It is **not a runtime
+sandbox**, and it's worth being upfront about the line:
+
+- ✅ **Handles:** a prompt-injected-but-cooperative agent, a secret about to be
+  pasted into chat or committed to a repo, plaintext leaking into model context.
+- ❌ **Does not handle:** a *genuinely malicious* process running as **you** — it
+  can use a secret through the normal `envault run` path just like your real
+  program does, and envault cannot stop it. A fully **compromised machine** can
+  even halt the audit log going forward (past tampering stays evident, not
+  impossible).
+
+If a hostile process is already executing as your user, envault is not the control
+you need — that calls for OS-level isolation (a sandbox, a separate user, a VM).
+See the full [security model](#security-model--the-safety-boundary) and
+[SECURITY.md](SECURITY.md).
 
 ## Install
 
@@ -274,6 +295,20 @@ envault is **beta**. It's usable day-to-day, but a few things are worth knowing:
   your own hardware; they behave differently across OSes.
 - Key rotation is not yet fully crash-safe (a crash mid-re-key leaves a small
   recovery window). Back up before rotating on a machine you don't trust to stay up.
+
+## Contributing
+
+Issues and pull requests are welcome. Before opening a PR, run:
+
+```bash
+cargo test
+cargo clippy --all-targets -- -D warnings
+cargo fmt --all
+```
+
+See **[CONTRIBUTING.md](CONTRIBUTING.md)** for dev setup, the full PR guidelines,
+and which modules are security-sensitive. Found a vulnerability? Please **don't**
+open a public issue — see **[SECURITY.md](SECURITY.md)**.
 
 ## License
 
