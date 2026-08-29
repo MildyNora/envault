@@ -30,14 +30,24 @@ your chat history.
 
 ## Install
 
+**Prebuilt binary — no Rust needed:**
+
 ```bash
-git clone https://github.com/MildyNora/envault.git
-cd envault
-./install.sh            # Windows: .\install.ps1
+curl -fsSL https://raw.githubusercontent.com/MildyNora/envault/master/install.sh | bash
+```
+```powershell
+# Windows (PowerShell)
+irm https://raw.githubusercontent.com/MildyNora/envault/master/install.ps1 | iex
 ```
 
-Installs the binary, creates your vault, and sets up the agent skill. Needs
-[Rust](https://rustup.rs). Runs on macOS, Windows, and Linux. Re-run to upgrade.
+Or **from source** (needs [Rust](https://rustup.rs)):
+
+```bash
+git clone https://github.com/MildyNora/envault.git && cd envault && ./install.sh
+```
+
+Any of these installs the binary, creates your vault, and sets up the agent skill.
+Runs on macOS, Windows, and Linux; re-run to upgrade.
 
 ## 👤 For you — the dashboard
 

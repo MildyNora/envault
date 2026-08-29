@@ -1,31 +1,52 @@
-# envault installer (Windows) — builds the binary and installs the agent skill.
+# envault installer (Windows).
 #
-#   ./install.ps1
+#   irm https://raw.githubusercontent.com/MildyNora/envault/master/install.ps1 | iex
+#   # or, from a clone:  .\install.ps1
 #
-# 1. Installs the `envault` binary via cargo.
-# 2. Writes the envault skill into the skill directories read by Claude Code,
-#    Codex, and opencode, so any of those agents learns the aliases-only
-#    workflow (loaded lazily, only when a task needs a secret).
-#
-# Re-run any time to upgrade — it reinstalls the binary and refreshes the skill.
+# Downloads a prebuilt binary (no Rust needed). If there's no prebuilt for your
+# platform and you're running inside a clone with cargo, it builds from source.
+# Then it creates your vault and installs the agent skill. Re-run to upgrade.
 $ErrorActionPreference = "Stop"
+$Repo = "MildyNora/envault"
+$BinDir = if ($env:ENVAULT_BIN_DIR) { $env:ENVAULT_BIN_DIR } else { "$env:LOCALAPPDATA\envault\bin" }
 
-$here = Split-Path -Parent $MyInvocation.MyCommand.Path
-
-if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
-    Write-Error "cargo not found. Install Rust from https://rustup.rs first."
-    exit 1
+function Install-Prebuilt {
+    $target = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "aarch64-pc-windows-msvc" } else { "x86_64-pc-windows-msvc" }
+    $url = "https://github.com/$Repo/releases/latest/download/envault-$target.zip"
+    Write-Host "==> Downloading prebuilt binary ($target)..."
+    $zip = Join-Path $env:TEMP "envault-download.zip"
+    try {
+        Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
+    } catch {
+        return $false
+    }
+    New-Item -ItemType Directory -Force -Path $BinDir | Out-Null
+    Expand-Archive -Path $zip -DestinationPath $BinDir -Force
+    Remove-Item $zip -ErrorAction SilentlyContinue
+    Write-Host "    installed $BinDir\envault.exe"
+    return $true
 }
 
-Write-Host "==> Installing the envault binary (cargo install)..."
-cargo install --path $here --locked --force
+function Install-FromSource {
+    if (-not $PSScriptRoot -or -not (Test-Path (Join-Path $PSScriptRoot "Cargo.toml"))) { return $false }
+    if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) { return $false }
+    Write-Host "==> No prebuilt for this platform — building from source (cargo)..."
+    cargo install --path $PSScriptRoot --locked --force
+    $script:BinDir = if ($env:CARGO_HOME) { "$env:CARGO_HOME\bin" } else { "$env:USERPROFILE\.cargo\bin" }
+    return $true
+}
 
-$cmd = Get-Command envault -ErrorAction SilentlyContinue
-if ($cmd) {
-    $bin = $cmd.Source
-} else {
-    $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { "$env:USERPROFILE\.cargo" }
-    $bin = Join-Path $cargoHome "bin\envault.exe"
+Write-Host "==> Installing envault..."
+if (-not (Install-Prebuilt)) {
+    if (-not (Install-FromSource)) {
+        Write-Error "No prebuilt binary for your platform and can't build from source. Grab a binary from https://github.com/$Repo/releases, or install Rust (https://rustup.rs) and run .\install.ps1 from a clone."
+        exit 1
+    }
+}
+
+$bin = Join-Path $BinDir "envault.exe"
+if (-not (Get-Command envault -ErrorAction SilentlyContinue)) {
+    Write-Host "`nnote: add $BinDir to your PATH to run 'envault' directly."
 }
 
 Write-Host "`n==> Creating your vault (if it doesn't exist yet)..."
@@ -34,4 +55,4 @@ Write-Host "`n==> Creating your vault (if it doesn't exist yet)..."
 Write-Host "`n==> Installing the agent skill..."
 & $bin skill install
 
-Write-Host "`nDone. Add your first secret with 'envault add <name>'."
+Write-Host "`nDone. Open the dashboard:  envault"
