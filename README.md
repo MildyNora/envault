@@ -122,16 +122,9 @@ $ envault request cloudflare \
 
 A small window opens on *your* screen (not in the agent's terminal):
 
-```text
-┌─ envault · a request from Claude Code ────────────────┐
-│  wants    cloudflare                                  │
-│  reason   deploy Workers — wrangler needs             │
-│           CLOUDFLARE_API_TOKEN                         │
-│                                                       │
-│  paste value (hidden)  ·  Enter grant  ·  Esc decline │
-│  ›  ••••••••••••••••••••••••••••                       │
-└───────────────────────────────────────────────────────┘
-```
+<p align="center">
+  <img src="docs/request.png" alt="envault request window — you grant a secret to the agent without it ever seeing the value" width="720">
+</p>
 
 You paste it once. The agent only ever learns the outcome — `0` granted, `3`
 declined (with your note), or `4`/`5`/`6` for cancelled / timeout / no-window.
