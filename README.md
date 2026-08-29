@@ -9,6 +9,10 @@
 ![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange)
 ![Status](https://img.shields.io/badge/status-beta-yellow)
 
+<br/>
+
+<img src="docs/dashboard.png" alt="envault dashboard — an interactive, encrypted secrets vault" width="860">
+
 </div>
 
 ---
