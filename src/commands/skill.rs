@@ -59,7 +59,10 @@ mod tests {
 
     #[test]
     fn embeds_a_neutral_skill() {
-        assert!(SKILL_MD.contains("name: envault"), "frontmatter name present");
+        assert!(
+            SKILL_MD.contains("name: envault"),
+            "frontmatter name present"
+        );
         // The universal skill must not reference the Claude-Code-only hook
         // mechanism — the guidance has to read correctly on every harness.
         assert!(!SKILL_MD.contains("hooks block you"));
