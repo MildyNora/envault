@@ -10,16 +10,17 @@ use super::theme::{ACCENT, DIM, DOTS, ERR, KEYCAP, OK};
 // Big block wordmark ("envault"), colored + filled.
 const BANNER: &str = r#"
  ███████ ███    ██ ██    ██  █████  ██    ██ ██    ████████
- ██      ████   ██ ██    ██ ██   ██ ██    ██ ██       ██
- █████   ██ ██  ██ ██    ██ ███████ ██    ██ ██       ██
- ██      ██  ██ ██  ██  ██  ██   ██ ██    ██ ██       ██
- ███████ ██   ████   ████   ██   ██  ██████  ███████  ██
+ ██▓▓▓▓▓▓████   ██▓██▓   ██▓██▓▓▓██ ██▓   ██▓██▓    ▓▓██▓▓▓▓
+ █████   ██▓██  ██▓██▓   ██▓███████▓██▓   ██▓██▓      ██▓
+ ██▓▓▓▓  ██▓ ██ ██▓ ██  ██▓▓██▓▓▓██▓██▓   ██▓██▓      ██▓
+ ███████ ██▓  ████▓  ████▓▓ ██▓  ██▓ ██████▓▓███████  ██▓
+  ▓▓▓▓▓▓▓ ▓▓   ▓▓▓▓   ▓▓▓▓   ▓▓   ▓▓  ▓▓▓▓▓▓  ▓▓▓▓▓▓▓  ▓▓
 "#;
 
 pub fn draw(frame: &mut Frame, app: &App) {
     let area = frame.area();
     // Banner only when there's comfortable vertical room.
-    let banner_h: u16 = if area.height >= 20 { 7 } else { 0 };
+    let banner_h: u16 = if area.height >= 20 { 8 } else { 0 };
 
     let outer = Layout::default()
         .direction(Direction::Vertical)
@@ -128,10 +129,19 @@ fn draw_banner(frame: &mut Frame, area: Rect, app: &App) {
         .lines()
         .skip(1) // leading newline
         .map(|l| {
-            Line::styled(
-                l.to_string(),
-                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-            )
+            // Face glyphs in the accent color, the extruded shadow dim — 3D pop.
+            let spans: Vec<Span> = l
+                .chars()
+                .map(|ch| match ch {
+                    '█' => Span::styled(
+                        ch.to_string(),
+                        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+                    ),
+                    '▓' => Span::styled(ch.to_string(), Style::default().fg(DIM)),
+                    _ => Span::raw(ch.to_string()),
+                })
+                .collect();
+            Line::from(spans)
         })
         .collect();
     lines.push(Line::from(vec![
