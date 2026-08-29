@@ -5,9 +5,16 @@ use crate::crypto;
 use crate::paths;
 use crate::store::Vault;
 
-pub fn cmd_init() -> Result<()> {
+pub fn cmd_init(if_needed: bool) -> Result<()> {
     let home = paths::envault_home();
     if paths::vault_file(&home).exists() {
+        if if_needed {
+            // Installers call `init --if-needed`: a pre-existing vault is fine.
+            // Never re-init — that would replace the keypair and orphan every
+            // secret already encrypted to the old one.
+            println!("envault already initialized at {}", home.display());
+            return Ok(());
+        }
         bail!("already initialized at {}", home.display());
     }
     fs::create_dir_all(&home)?;

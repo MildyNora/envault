@@ -13,9 +13,9 @@ processes started by `envault run`. Keep it that way.
   secret to any file.
 - Refer to secrets by name only. `[envault:<name>]` in output means masking
   **worked** — not an error; don't try to unmask it.
-- Human-only (hooks block you): the bare `envault` dashboard, `envault rotate`,
-  `envault request-window`, `envault audit`, `envault config set`, and reading
-  `~/.envault/`. Don't attempt them — ask the user instead.
+- Human-only — ask the user, never run these: the bare `envault` dashboard,
+  `envault rotate`, `envault request-window`, `envault audit`, `envault config set`,
+  and reading `~/.envault/`.
 
 ## Workflow
 1. **Discover:** `envault ls --json` → names + labels only.

@@ -27,7 +27,7 @@ pub fn run_tui() -> Result<()> {
         let mut line = String::new();
         std::io::stdin().read_line(&mut line)?;
         if line.trim().eq_ignore_ascii_case("y") {
-            crate::commands::init::cmd_init()?;
+            crate::commands::init::cmd_init(false)?;
         } else {
             bail!("no vault — nothing to show");
         }

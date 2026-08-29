@@ -32,9 +32,21 @@ enum ConfigAction {
 }
 
 #[derive(Subcommand)]
+enum SkillAction {
+    /// Write the envault skill into your agents' skill directories
+    Install,
+    /// Print the skill to stdout (paste into any agent that reads a rules file)
+    Print,
+}
+
+#[derive(Subcommand)]
 enum Cmd {
     /// Create the vault and generate the keypair
-    Init,
+    Init {
+        /// Succeed quietly if the vault already exists (used by installers)
+        #[arg(long)]
+        if_needed: bool,
+    },
     /// Add a secret (value via hidden prompt, or --stdin)
     Add {
         alias: String,
@@ -98,6 +110,11 @@ enum Cmd {
     RequestWindow { session: std::path::PathBuf },
     /// Re-encrypt the vault to a brand-new keypair (revokes Keychain grants)
     Rotate,
+    /// Install or print the agent skill (Claude Code, Codex, opencode)
+    Skill {
+        #[command(subcommand)]
+        action: SkillAction,
+    },
     /// Run a command with secrets injected and masked out of its output
     Run {
         #[arg(long)]
@@ -117,7 +134,7 @@ fn main() {
     let cli = Cli::parse();
     let result = match cli.cmd {
         None => tui::run_tui(),
-        Some(Cmd::Init) => commands::init::cmd_init(),
+        Some(Cmd::Init { if_needed }) => commands::init::cmd_init(if_needed),
         Some(Cmd::Add {
             alias,
             label,
@@ -153,6 +170,10 @@ fn main() {
         },
         Some(Cmd::RequestWindow { session }) => commands::request::cmd_request_window(session),
         Some(Cmd::Rotate) => commands::rotate::cmd_rotate(),
+        Some(Cmd::Skill { action }) => match action {
+            SkillAction::Install => commands::skill::cmd_skill_install(),
+            SkillAction::Print => commands::skill::cmd_skill_print(),
+        },
         Some(Cmd::Run {
             manifest,
             env,

@@ -590,3 +590,20 @@ fn init_twice_fails() {
         .failure()
         .stderr(predicates::str::contains("already initialized"));
 }
+
+#[test]
+fn init_if_needed_is_idempotent() {
+    let te = TestEnv::new();
+    // On a fresh vault, `--if-needed` initializes just like a normal init…
+    te.envault()
+        .args(["init", "--if-needed"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Initialized"));
+    // …and a second run succeeds (installers re-run it) instead of failing.
+    te.envault()
+        .args(["init", "--if-needed"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("already initialized"));
+}

@@ -6,6 +6,8 @@
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
+// Only the debug-gated inline fallback below uses this; release never does (M4).
+#[cfg(debug_assertions)]
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 

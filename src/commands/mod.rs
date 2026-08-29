@@ -10,3 +10,4 @@ pub mod ls;
 pub mod request;
 pub mod rotate;
 pub mod run;
+pub mod skill;
