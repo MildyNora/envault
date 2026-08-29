@@ -189,6 +189,38 @@ Everywhere else, secrets stay encrypted.
 envault is honest about what it does and doesn't do. It raises the cost of leaking
 a secret; it is **not a sandbox.**
 
+The trust boundary — what the agent can reach, and what it can't:
+
+```mermaid
+flowchart TB
+    subgraph HUMAN["🔓 You — trusted"]
+        S["plaintext secret"]
+    end
+    subgraph OSK["🔑 OS keychain — never leaves the device"]
+        PK["age private key"]
+    end
+    subgraph VAULT["📦 Vault on disk"]
+        N["names"]
+        C["age ciphers"]
+    end
+    subgraph AGENT["🤖 Agent — untrusted"]
+        SEES["sees names ✅ and ciphers ✅"]
+        NEVER["never plaintext ❌ or the key ❌"]
+        ASK["envault request"]
+    end
+
+    S -->|"envault add"| C
+    PK -. "decrypts only inside run / request" .-> C
+    N --> SEES
+    C --> SEES
+    ASK -. "pops a window for you" .-> S
+
+    classDef trust fill:#e8f5e9,stroke:#2e7d32,color:#000;
+    classDef danger fill:#ffebee,stroke:#c62828,color:#000;
+    class S,PK trust;
+    class SEES,NEVER,ASK danger;
+```
+
 **✅ envault protects against**
 
 - Secrets reaching the model's context or prompt (agents only ever get names + ciphers).
