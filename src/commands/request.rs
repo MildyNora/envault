@@ -604,12 +604,17 @@ mod tests {
         assert!(!result.contains("granted-secret-42"));
     }
 
+    #[cfg(unix)]
     #[test]
-    fn command_escaping_is_safe() {
-        // shell_quote keeps a value with spaces/quotes as one safe argument
+    fn shell_quote_wraps_as_one_arg() {
+        // keeps a value with spaces/quotes as a single safe argument
         assert_eq!(shell_quote("a b"), "'a b'");
         assert_eq!(shell_quote("it's"), "'it'\\''s'");
-        // applescript_escape neutralizes quotes and backslashes
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn applescript_escape_neutralizes_quotes() {
         assert_eq!(applescript_escape("a\"b\\c"), "a\\\"b\\\\c");
     }
 

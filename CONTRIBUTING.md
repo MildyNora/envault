@@ -29,7 +29,7 @@ cargo fmt --all
 If you touched anything platform-specific, cross-check Windows too:
 
 ```bash
-cargo check --target x86_64-pc-windows-gnu   # needs the mingw target
+cargo check --all-targets --target x86_64-pc-windows-gnu   # --all-targets compiles tests too
 ```
 
 The runtime paths (macOS Keychain, Windows Credential Manager, Touch ID / Windows
