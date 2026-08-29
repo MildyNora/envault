@@ -159,29 +159,16 @@ agent names what it needs, you hand it over once, and it stays out of the model.
 
 ## How it works
 
-Plaintext goes in; only ciphers rest on disk; the private key stays in the
-keychain; and even inside `envault run`, the output is masked:
+Everything hinges on one trust boundary. You store a secret and it's age-encrypted
+into the vault; the private key never leaves the OS keychain; the agent only ever
+sees names and ciphers; and even inside `envault run` the child process's output
+is masked.
 
-```mermaid
-flowchart LR
-    H(["You"]) -->|"secret (plaintext)"| ADD["envault add"]
-    KC[["OS keychain<br/>(age private key)"]] -.->|"public key only"| ADD
-    ADD -->|"age-encrypt"| V[("Vault<br/>name → cipher")]
+<p align="center">
+  <img src="docs/architecture.svg" alt="envault architecture: a trusted zone (you + OS keychain) and an untrusted coding-agent zone separated by a boundary, with the numbered data flow through the vault" width="560">
+</p>
 
-    subgraph RUN["envault run"]
-        direction LR
-        V --> DEC{{"decrypt"}}
-        KC -.->|"unlock"| DEC
-        DEC -->|"as env vars"| CMD["your command"]
-        CMD -->|"stdout / stderr"| MASK{{"mask values"}}
-        MASK --> OUT["terminal / agent"]
-    end
-
-    classDef secret fill:#fde4ec,stroke:#c2185b,color:#000;
-    classDef safe fill:#e3f2fd,stroke:#1976d2,color:#000;
-    class H,DEC,CMD secret;
-    class ADD,V,MASK,OUT safe;
-```
+<sub>Figure generated from committed source — [`docs/architecture.d2`](docs/architecture.d2) (`d2 docs/architecture.d2 docs/architecture.svg`), so it diffs in review and stays in step with the code.</sub>
 
 **Data model.** The vault (`~/.envault/vault.json`) is a list of entries — each a
 name plus an [age](https://age-encryption.org)-encrypted cipher. No plaintext is
@@ -207,27 +194,9 @@ Everywhere else, secrets stay encrypted.
 envault is honest about what it does and doesn't do. It raises the cost of leaking
 a secret; it is **not a sandbox.**
 
-The trust boundary — what the agent can reach, and what it can't:
-
-```mermaid
-flowchart LR
-    S["🔓 plaintext secret<br/>(yours, trusted)"]
-    PK["🔑 age private key<br/>(in the OS keychain)"]
-    V[("📦 Vault on disk<br/>names + age ciphers")]
-    A["🤖 Agent — untrusted<br/>✅ sees names + ciphers<br/>❌ never plaintext or the key"]
-
-    S -->|"envault add (encrypt)"| V
-    PK -.->|"decrypts only inside<br/>envault run / request"| V
-    V ==>|"names + ciphers only"| A
-    A -.->|"envault request<br/>(pops a window for you)"| S
-
-    classDef trust fill:#e8f5e9,stroke:#2e7d32,color:#000;
-    classDef danger fill:#ffebee,stroke:#c62828,color:#000;
-    classDef vault fill:#e3f2fd,stroke:#1976d2,color:#000;
-    class S,PK trust;
-    class A danger;
-    class V vault;
-```
+The trust boundary is the figure above: the coding agent sits in the untrusted
+zone and can only ever reach **names + ciphers** — never the plaintext, never the
+private key.
 
 **✅ envault protects against**
 

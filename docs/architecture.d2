@@ -1,0 +1,35 @@
+# envault architecture — publication-style data-flow figure.
+# Render:  d2 --theme 0 --layout dagre --pad 30 docs/architecture.d2 docs/architecture.svg
+# The SVG bakes a white background, so it stays legible on GitHub light AND dark.
+direction: down
+
+classes: {
+  box:   { style: { stroke: "#222222"; stroke-width: 1; fill: "#f6f7f9"; font-size: 21 } }
+  store: { style: { stroke: "#222222"; stroke-width: 1; fill: "#edf1f7"; font-size: 21 } }
+  zone:  { style: { stroke-dash: 5; stroke-width: 2; fill: "#fcfcfd"; font-size: 20; bold: true } }
+}
+
+trusted: "Trusted · your machine" {
+  class: zone
+  style.stroke: "#2e7d32"
+  direction: right
+  human: "You" { shape: person; class: box }
+  keychain: "OS keychain\n(age private key)" { shape: cylinder; class: store }
+}
+
+vault: "Vault  ~/.envault\nnames + age ciphers" { shape: cylinder; class: store }
+
+untrusted: "Untrusted · coding agent" {
+  class: zone
+  style.stroke: "#c0392b"
+  direction: right
+  agent: "Agent\n(sees names + ciphers only)" { class: box }
+  child: "envault run\nchild process · output masked" { shape: rectangle; class: box }
+}
+
+trusted.human -> vault: "① store → age-encrypt" { style.font-size: 19 }
+vault -> untrusted.agent: "② read" { style.font-size: 19 }
+untrusted.agent -> untrusted.child: "③ run <cmd>" { style.font-size: 19 }
+vault -> untrusted.child: "decrypt → env var" { style.font-size: 19 }
+trusted.keychain -> untrusted.child: "unlock (run only)" { style.stroke-dash: 3; style.font-size: 19 }
+untrusted.agent -> trusted.human: "④ envault request (pop-up)" { style.stroke-dash: 3; style.font-size: 19 }
