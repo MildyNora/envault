@@ -2,7 +2,7 @@
 
 # Envault
 
-**A local, minimum, encrypted secrets vault for coding agents — let your AI works with your keys and secret, but never sees them.**
+**A local, minimal encrypted secrets vault for coding agents — let your AI work with your keys and secrets without ever seeing them.**
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey)

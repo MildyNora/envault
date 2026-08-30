@@ -1,8 +1,7 @@
 # envault — How It Works & the Safety Boundary
 
-> **Internal draft.** Working notes on the design and — more importantly — the
-> exact line between what envault protects and what it deliberately does not.
-> This is not the public README. Correct as of **v0.7.0**.
+> The design, and — more importantly — the exact line between what envault
+> protects and what it deliberately does not. Current as of **v0.7.0**.
 
 ---
 
