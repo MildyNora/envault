@@ -74,9 +74,9 @@ fn event_loop(app: &mut App, home: &std::path::Path) -> Result<()> {
         if now != last_mtime {
             // Only commit the new mtime once the load actually succeeds, so a
             // read that lands mid-write (partial JSON) is retried next tick.
-            if let Ok(v) = Vault::load(home) {
+            if let (Ok(v), Ok(recipient)) = (Vault::load(home), crypto::recipient_from_identity()) {
                 last_mtime = now;
-                app.reload_vault(v);
+                app.reload_vault(v, recipient);
                 app.set_info("vault updated");
             }
         }
