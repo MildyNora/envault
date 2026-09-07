@@ -178,6 +178,51 @@ fn run_passes_exit_code_through() {
         .code(3);
 }
 
+#[cfg(unix)]
+#[test]
+fn run_masks_multiline_secrets_after_pty_newline_conversion() {
+    let te = TestEnv::new();
+    te.init();
+    for (alias, value) in [
+        ("lf-key", "SYNTHETIC-FIRST-9988\nSYNTHETIC-LAST-7766"),
+        ("crlf-key", "SYNTHETIC-FIRST-9988\r\nSYNTHETIC-LAST-7766"),
+    ] {
+        te.envault()
+            .args(["add", alias, "--stdin"])
+            .write_stdin(value)
+            .assert()
+            .success();
+        // Exercise the actual PTY with translation enabled and disabled.
+        for mode in ["onlcr", "-onlcr"] {
+            let script = format!(
+                "stty opost {mode}; printf 'before|%s|after' \"$MULTILINE_KEY\"; \
+                 printf '|stderr:%s|' \"$MULTILINE_KEY\" >&2"
+            );
+            let output = te
+                .envault()
+                .args([
+                    "run",
+                    "--env",
+                    &format!("MULTILINE_KEY={alias}"),
+                    "--",
+                    "sh",
+                    "-c",
+                    &script,
+                ])
+                .assert()
+                .success();
+            // Closing the PTY input writer may prepend a blank line.
+            let stdout = std::str::from_utf8(&output.get_output().stdout).unwrap();
+            assert_eq!(
+                stdout.trim_start_matches(['\r', '\n']),
+                format!("before|[envault:{alias}]|after|stderr:[envault:{alias}]|"),
+                "alias {alias}, mode {mode}"
+            );
+            assert!(output.get_output().stderr.is_empty());
+        }
+    }
+}
+
 #[test]
 fn run_fails_listing_all_missing_aliases() {
     let te = TestEnv::new();
