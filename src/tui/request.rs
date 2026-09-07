@@ -67,9 +67,9 @@ impl RequestApp {
                         return Some(Outcome::Granted(self.value.clone()));
                     }
                 }
-                // `n` decides to decline — but only when the value box is still
-                // empty, so it can't hijack a key that begins with 'n'.
-                KeyCode::Char('n') if self.value.is_empty() => {
+                // Decline must be an explicit non-printable action: a value's
+                // first character must never redirect the rest into the note.
+                KeyCode::F(2) => {
                     self.field = Field::Note;
                 }
                 KeyCode::Char(c) => self.value.push(c),
@@ -192,7 +192,7 @@ pub fn draw(frame: &mut Frame, app: &RequestApp) {
             Line::from(vec![
                 keycap("Enter"),
                 Span::styled(" grant & close   ", Style::default().fg(DIM)),
-                keycap("n"),
+                keycap("F2"),
                 Span::styled(" decline   ", Style::default().fg(DIM)),
                 keycap("Esc"),
                 Span::styled(" cancel", Style::default().fg(DIM)),
@@ -276,9 +276,9 @@ mod tests {
     }
 
     #[test]
-    fn n_on_empty_starts_decline_then_note_sends() {
+    fn f2_starts_decline_then_note_sends() {
         let mut app = RequestApp::new(meta());
-        assert_eq!(app.handle_key(ch('n')), None);
+        assert_eq!(app.handle_key(key(KeyCode::F(2))), None);
         assert!(app.declining());
         typ(&mut app, "use OpenAI instead");
         assert_eq!(
@@ -290,7 +290,7 @@ mod tests {
     #[test]
     fn decline_with_empty_note_is_allowed() {
         let mut app = RequestApp::new(meta());
-        app.handle_key(ch('n')); // into decline
+        app.handle_key(key(KeyCode::F(2))); // into decline
         assert!(app.declining());
         // press Enter immediately, no note typed
         assert_eq!(
@@ -309,18 +309,62 @@ mod tests {
     }
 
     #[test]
+    fn n_prefixed_values_are_granted_without_a_note() {
+        for value in ["n", "nSYNTHETIC-SECRET-9988", "nn-secret", "N-secret"] {
+            let mut app = RequestApp::new(meta());
+            typ(&mut app, value);
+            assert!(!app.declining());
+            assert!(app.note.is_empty());
+            assert_eq!(
+                app.handle_key(key(KeyCode::Enter)),
+                Some(Outcome::Granted(value.into()))
+            );
+        }
+    }
+
+    #[test]
+    fn n_after_clearing_value_is_still_secret_input() {
+        let mut app = RequestApp::new(meta());
+        typ(&mut app, "x");
+        app.handle_key(key(KeyCode::Backspace));
+        typ(&mut app, "nSYNTHETIC-SECRET-9988");
+        assert_eq!(
+            app.handle_key(key(KeyCode::Enter)),
+            Some(Outcome::Granted("nSYNTHETIC-SECRET-9988".into()))
+        );
+        assert!(app.note.is_empty());
+    }
+
+    #[test]
+    fn explicit_decline_keeps_existing_value_out_of_note() {
+        let mut app = RequestApp::new(meta());
+        typ(&mut app, "nSYNTHETIC-SECRET-9988");
+        app.handle_key(key(KeyCode::F(2)));
+        assert!(app.declining());
+        assert!(app.note.is_empty());
+        typ(&mut app, "use another provider");
+        assert_eq!(
+            app.handle_key(key(KeyCode::Enter)),
+            Some(Outcome::Declined("use another provider".into()))
+        );
+    }
+
+    #[test]
     fn esc_cancels_and_esc_in_note_returns() {
         let mut app = RequestApp::new(meta());
-        app.handle_key(ch('n')); // into note
+        typ(&mut app, "nSYNTHETIC-SECRET-9988");
+        app.handle_key(key(KeyCode::F(2))); // into note
+        typ(&mut app, "optional note");
         app.handle_key(key(KeyCode::Esc)); // back to value
         assert!(!app.declining());
+        assert_eq!(app.value, "nSYNTHETIC-SECRET-9988");
         assert_eq!(app.handle_key(key(KeyCode::Esc)), Some(Outcome::Cancelled));
     }
 
     #[test]
     fn renders_agent_name_and_masks_value() {
         let mut app = RequestApp::new(meta());
-        typ(&mut app, "secret123");
+        typ(&mut app, "nSYNTHETIC-SECRET-9988");
         let mut t = Terminal::new(TestBackend::new(90, 26)).unwrap();
         t.draw(|f| draw(f, &app)).unwrap();
         let buf = t.backend().buffer();
@@ -335,7 +379,11 @@ mod tests {
         assert!(text.contains("Claude Code"), "shows agent: {text}");
         assert!(text.contains("openrouter"), "shows name: {text}");
         assert!(text.contains("reason"), "shows reason label: {text}");
-        assert!(!text.contains("secret123"), "value must be masked: {text}");
+        assert!(text.contains("F2"), "shows explicit decline key: {text}");
+        assert!(
+            !text.contains("SYNTHETIC-SECRET-9988"),
+            "value must be masked: {text}"
+        );
         assert!(text.contains("•"), "masked dots: {text}");
     }
 }

@@ -549,6 +549,16 @@ fn applescript_escape(s: &str) -> String {
 mod tests {
     use super::*;
     use crate::crypto::{decrypt_value, generate_identity, store_recipient};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn type_text(app: &mut RequestApp, text: &str) {
+        for c in text.chars() {
+            assert_eq!(
+                app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)),
+                None
+            );
+        }
+    }
 
     fn meta(name: &str) -> RequestFile {
         RequestFile {
@@ -561,7 +571,7 @@ mod tests {
     }
 
     #[test]
-    fn grant_encrypts_into_vault_and_reports() {
+    fn n_prefixed_request_encrypts_into_vault_and_reports_without_note() {
         // finish() derives the recipient from the (Keychain) identity; in tests
         // that resolves through ENVAULT_IDENTITY_FILE, so set one up.
         let _guard = crate::crypto::test_env_lock();
@@ -574,13 +584,13 @@ mod tests {
         store_recipient(&id, home.path()).unwrap();
         Vault::default().save(home.path()).unwrap();
 
-        let code = finish(
-            home.path(),
-            &meta("newkey"),
-            Outcome::Granted("granted-secret-42".into()),
-            Some(session.path()),
-        )
-        .unwrap();
+        let meta = meta("newkey");
+        let mut app = RequestApp::new(meta_to_request(&meta));
+        type_text(&mut app, "nSYNTHETIC-SECRET-9988");
+        let outcome = app
+            .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        let code = finish(home.path(), &meta, outcome, Some(session.path())).unwrap();
         std::env::remove_var("ENVAULT_IDENTITY_FILE");
         assert_eq!(code, 0);
 
@@ -590,18 +600,20 @@ mod tests {
         assert_eq!(entry.label, "My Label");
         assert_eq!(
             decrypt_value(&id, &entry.cipher).unwrap(),
-            "granted-secret-42"
+            "nSYNTHETIC-SECRET-9988"
         );
         assert!(entry.notes.contains("Test Agent") && entry.notes.contains("the demo"));
 
         // plaintext never lands on disk
         let raw = std::fs::read_to_string(crate::paths::vault_file(home.path())).unwrap();
-        assert!(!raw.contains("granted-secret-42"));
+        assert!(!raw.contains("SYNTHETIC-SECRET-9988"));
 
         // the agent-facing result says granted, no value
         let result = std::fs::read_to_string(session.path().join("result.json")).unwrap();
-        assert!(result.contains("granted"));
-        assert!(!result.contains("granted-secret-42"));
+        assert!(!result.contains("SYNTHETIC-SECRET-9988"));
+        let result: ResultFile = serde_json::from_str(&result).unwrap();
+        assert_eq!(result.outcome, "granted");
+        assert!(result.note.is_none());
     }
 
     #[cfg(unix)]
@@ -626,16 +638,42 @@ mod tests {
         store_recipient(&id, home.path()).unwrap();
         Vault::default().save(home.path()).unwrap();
 
-        let code = finish(
-            home.path(),
-            &meta("newkey"),
-            Outcome::Declined("use deepseek instead".into()),
-            Some(session.path()),
-        )
-        .unwrap();
+        let meta = meta("newkey");
+        let mut app = RequestApp::new(meta_to_request(&meta));
+        type_text(&mut app, "nSYNTHETIC-SECRET-9988");
+        app.handle_key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE));
+        type_text(&mut app, "use deepseek instead");
+        let outcome = app
+            .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        let code = finish(home.path(), &meta, outcome, Some(session.path())).unwrap();
         assert_eq!(code, 3);
         assert!(Vault::load(home.path()).unwrap().get("newkey").is_none());
         let result = std::fs::read_to_string(session.path().join("result.json")).unwrap();
-        assert!(result.contains("declined") && result.contains("use deepseek instead"));
+        let result: ResultFile = serde_json::from_str(&result).unwrap();
+        assert_eq!(result.outcome, "declined");
+        assert_eq!(result.note.as_deref(), Some("use deepseek instead"));
+    }
+
+    #[test]
+    fn cancelled_request_reports_no_value_or_note() {
+        let home = tempfile::TempDir::new().unwrap();
+        let session = tempfile::TempDir::new().unwrap();
+        let meta = meta("newkey");
+        let mut app = RequestApp::new(meta_to_request(&meta));
+        type_text(&mut app, "nSYNTHETIC-SECRET-9988");
+        let outcome = app
+            .handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(
+            finish(home.path(), &meta, outcome, Some(session.path())).unwrap(),
+            4
+        );
+        assert!(!crate::paths::vault_file(home.path()).exists());
+        let raw = std::fs::read_to_string(session.path().join("result.json")).unwrap();
+        assert!(!raw.contains("SYNTHETIC-SECRET-9988"));
+        let result: ResultFile = serde_json::from_str(&raw).unwrap();
+        assert_eq!(result.outcome, "cancelled");
+        assert!(result.note.is_none());
     }
 }
