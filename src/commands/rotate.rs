@@ -40,7 +40,7 @@ pub fn rotate_in_place(home: &Path) -> Result<RotateOutcome> {
 
     // Delete-then-create gives the new Keychain item a fresh ACL, so macOS
     // asks for authorization again: rotation revokes every prior grant.
-    crypto::delete_identity()?;
+    crypto::delete_identity(home)?;
     crypto::store_identity(&new_identity, home)?;
     fs::rename(&staged, paths::vault_file(home)).context("activating the rotated vault")?;
     crypto::store_recipient(&new_identity, home)?;

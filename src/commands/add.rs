@@ -35,7 +35,7 @@ pub fn cmd_add(
         bail!("empty value");
     }
 
-    let recipient = crypto::recipient_from_identity()?;
+    let recipient = crypto::recipient_from_identity(&home)?;
     let cipher = crypto::encrypt_value(&recipient, &value)?;
     let now = now_rfc3339();
     vault.insert(SecretEntry {

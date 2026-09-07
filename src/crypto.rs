@@ -21,31 +21,62 @@ pub fn decrypt_value(identity: &age::x25519::Identity, cipher_b64: &str) -> Resu
 }
 
 use age::secrecy::ExposeSecret;
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::Path;
 use std::str::FromStr;
 
 const KEYCHAIN_SERVICE: &str = "envault";
-const KEYCHAIN_ACCOUNT: &str = "age-identity";
+const LEGACY_KEYCHAIN_ACCOUNT: &str = "age-identity";
+
+fn identity_account(home: &Path) -> Result<String> {
+    let home = fs::canonicalize(home)
+        .with_context(|| format!("resolving envault home {}", home.display()))?;
+    let digest = Sha256::digest(home.as_os_str().as_encoded_bytes());
+    Ok(format!("age-identity-{digest:x}"))
+}
 
 /// Test-only escape hatch to store the identity in a file instead of the
 /// Keychain. Honored ONLY in debug/test builds; a release binary (what
 /// `cargo install` produces) ignores it, so a malicious agent cannot redirect
 /// the private key to an attacker-named plaintext file. (H5)
-fn identity_file_override() -> Option<std::path::PathBuf> {
+fn identity_file_override(home: &Path) -> Result<Option<std::path::PathBuf>> {
     #[cfg(debug_assertions)]
     {
-        std::env::var("ENVAULT_IDENTITY_FILE").ok().map(Into::into)
+        if let Ok(dir) = std::env::var("ENVAULT_IDENTITY_DIR") {
+            return Ok(Some(
+                std::path::PathBuf::from(dir).join(identity_account(home)?),
+            ));
+        }
+        Ok(std::env::var("ENVAULT_IDENTITY_FILE").ok().map(Into::into))
     }
     #[cfg(not(debug_assertions))]
     {
-        None
+        let _ = home;
+        Ok(None)
     }
 }
 
-pub fn store_identity(identity: &age::x25519::Identity, _home: &Path) -> Result<()> {
+fn parse_identity(raw: &str) -> Result<age::x25519::Identity> {
+    age::x25519::Identity::from_str(raw.trim())
+        .map_err(|e| anyhow::anyhow!("invalid age identity: {e}"))
+}
+
+fn parse_matching_legacy_identity(raw: &str, home: &Path) -> Result<age::x25519::Identity> {
+    let identity = parse_identity(raw)?;
+    let recipient = load_recipient(home)?;
+    if identity.to_public().to_string() != recipient.to_string() {
+        anyhow::bail!(
+            "no matching envault identity for {} — restore its original identity or backup",
+            home.display()
+        );
+    }
+    Ok(identity)
+}
+
+pub fn store_identity(identity: &age::x25519::Identity, home: &Path) -> Result<()> {
     let key = identity.to_string(); // SecretString
-    if let Some(path) = identity_file_override() {
+    if let Some(path) = identity_file_override(home)? {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -53,37 +84,52 @@ pub fn store_identity(identity: &age::x25519::Identity, _home: &Path) -> Result<
         crate::platform::set_mode(&path, 0o600)?;
         return Ok(());
     }
-    let entry = keyring::Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT)
-        .context("opening Keychain entry")?;
+    let account = identity_account(home)?;
+    let entry =
+        keyring::Entry::new(KEYCHAIN_SERVICE, &account).context("opening Keychain entry")?;
     entry
         .set_password(key.expose_secret())
         .context("storing identity in the macOS Keychain")
 }
 
-pub fn load_identity() -> Result<age::x25519::Identity> {
-    let raw = if let Some(path) = identity_file_override() {
-        fs::read_to_string(&path)
-            .with_context(|| format!("reading identity file {}", path.display()))?
-    } else {
-        let entry = keyring::Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT)
-            .context("opening Keychain entry")?;
-        entry.get_password().context(
-            "no envault identity in the Keychain — run `envault init` (or grant Keychain access)",
-        )?
+pub fn load_identity(home: &Path) -> Result<age::x25519::Identity> {
+    if let Some(path) = identity_file_override(home)? {
+        let raw = fs::read_to_string(&path)
+            .with_context(|| format!("reading identity file {}", path.display()))?;
+        return parse_identity(&raw);
+    }
+
+    let account = identity_account(home)?;
+    let entry =
+        keyring::Entry::new(KEYCHAIN_SERVICE, &account).context("opening Keychain entry")?;
+    let raw = match entry.get_password() {
+        Ok(raw) => raw,
+        Err(keyring::Error::NoEntry) => {
+            // Pre-scoping releases stored one global identity. Accept it only
+            // when its public key matches this vault, so a different home can
+            // never inherit unrelated key material.
+            let legacy = keyring::Entry::new(KEYCHAIN_SERVICE, LEGACY_KEYCHAIN_ACCOUNT)
+                .context("opening legacy Keychain entry")?;
+            let raw = legacy.get_password().context(
+                "no envault identity in the Keychain — run `envault init` (or grant Keychain access)",
+            )?;
+            return parse_matching_legacy_identity(&raw, home);
+        }
+        Err(e) => return Err(e).context("reading identity from the Keychain"),
     };
-    age::x25519::Identity::from_str(raw.trim())
-        .map_err(|e| anyhow::anyhow!("invalid age identity: {e}"))
+    parse_identity(&raw)
 }
 
-pub fn delete_identity() -> Result<()> {
-    if let Some(path) = identity_file_override() {
+pub fn delete_identity(home: &Path) -> Result<()> {
+    if let Some(path) = identity_file_override(home)? {
         if path.exists() {
             fs::remove_file(&path)?;
         }
         return Ok(());
     }
-    let entry = keyring::Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT)
-        .context("opening Keychain entry")?;
+    let account = identity_account(home)?;
+    let entry =
+        keyring::Entry::new(KEYCHAIN_SERVICE, &account).context("opening Keychain entry")?;
     match entry.delete_credential() {
         Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
         Err(e) => Err(e).context("deleting the old identity from the Keychain"),
@@ -116,8 +162,8 @@ pub fn load_recipient(home: &Path) -> Result<age::x25519::Recipient> {
 /// identity rather than the on-disk `recipient.txt`. Use this on every encrypt
 /// path so a tampered `recipient.txt` or an agent-chosen `ENVAULT_HOME` cannot
 /// reseal secrets to an attacker's key. (H2, H3)
-pub fn recipient_from_identity() -> Result<age::x25519::Recipient> {
-    Ok(load_identity()?.to_public())
+pub fn recipient_from_identity(home: &Path) -> Result<age::x25519::Recipient> {
+    Ok(load_identity(home)?.to_public())
 }
 
 /// Serializes the handful of unit tests that mutate the process-wide
@@ -166,7 +212,7 @@ mod tests {
         let id = generate_identity();
         store_identity(&id, dir.path()).unwrap();
         store_recipient(&id, dir.path()).unwrap();
-        let loaded = load_identity().unwrap();
+        let loaded = load_identity(dir.path()).unwrap();
         std::env::remove_var("ENVAULT_IDENTITY_FILE");
 
         let cipher = encrypt_value(&load_recipient(dir.path()).unwrap(), "roundtrip").unwrap();
@@ -178,6 +224,24 @@ mod tests {
             let mode = std::fs::metadata(&id_path).unwrap().permissions().mode();
             assert_eq!(mode & 0o777, 0o600);
         }
+    }
+
+    #[test]
+    fn legacy_identity_must_match_the_vault_recipient() {
+        let home = tempfile::TempDir::new().unwrap();
+        let identity = generate_identity();
+        let other = generate_identity();
+        store_recipient(&identity, home.path()).unwrap();
+
+        let raw = identity.to_string();
+        assert!(parse_matching_legacy_identity(raw.expose_secret(), home.path()).is_ok());
+
+        let raw = other.to_string();
+        let err = match parse_matching_legacy_identity(raw.expose_secret(), home.path()) {
+            Ok(_) => panic!("unrelated legacy identity was accepted"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("no matching envault identity"));
     }
 
     #[test]

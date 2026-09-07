@@ -66,6 +66,82 @@ fn init_creates_vault_recipient_and_identity() {
 }
 
 #[test]
+fn separate_homes_keep_separate_identities() {
+    let first_home = TempDir::new().unwrap();
+    let second_home = TempDir::new().unwrap();
+    let first_project = TempDir::new().unwrap();
+    let second_project = TempDir::new().unwrap();
+    let credentials = TempDir::new().unwrap();
+    let identity_file = credentials.path().join("shared-identity.txt");
+
+    let command = |home: &std::path::Path, project: &std::path::Path| {
+        let mut command = Command::cargo_bin("envault").unwrap();
+        command
+            .env("ENVAULT_HOME", home)
+            // New builds model separate Keychain accounts in this directory.
+            .env("ENVAULT_IDENTITY_DIR", credentials.path())
+            // Old builds ignore the directory and collide in this one file.
+            .env("ENVAULT_IDENTITY_FILE", &identity_file)
+            .current_dir(project);
+        command
+    };
+
+    command(first_home.path(), first_project.path())
+        .arg("init")
+        .assert()
+        .success();
+    command(first_home.path(), first_project.path())
+        .args(["add", "first-key", "--stdin"])
+        .write_stdin("SYNTHETIC-FIRST-HOME-9988\n")
+        .assert()
+        .success();
+
+    command(second_home.path(), second_project.path())
+        .arg("init")
+        .assert()
+        .success();
+    command(second_home.path(), second_project.path())
+        .args(["add", "second-key", "--stdin"])
+        .write_stdin("SYNTHETIC-SECOND-HOME-7766\n")
+        .assert()
+        .success();
+    assert!(
+        !identity_file.exists(),
+        "the legacy global slot stays unused"
+    );
+    assert_eq!(
+        std::fs::read_dir(credentials.path()).unwrap().count(),
+        2,
+        "each home must have its own credential"
+    );
+
+    command(first_home.path(), first_project.path())
+        .args([
+            "run",
+            "--env",
+            "FIRST=first-key",
+            "--",
+            "sh",
+            "-c",
+            "test \"$FIRST\" = SYNTHETIC-FIRST-HOME-9988",
+        ])
+        .assert()
+        .success();
+    command(second_home.path(), second_project.path())
+        .args([
+            "run",
+            "--env",
+            "SECOND=second-key",
+            "--",
+            "sh",
+            "-c",
+            "test \"$SECOND\" = SYNTHETIC-SECOND-HOME-7766",
+        ])
+        .assert()
+        .success();
+}
+
+#[test]
 fn add_then_ls_shows_alias_but_never_value() {
     let te = TestEnv::new();
     te.init();

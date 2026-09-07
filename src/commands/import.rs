@@ -13,7 +13,7 @@ fn to_alias(var: &str) -> String {
 pub fn cmd_import(file: PathBuf) -> Result<()> {
     let home = paths::envault_home();
     let mut vault = Vault::load(&home)?;
-    let recipient = crypto::recipient_from_identity()?;
+    let recipient = crypto::recipient_from_identity(&home)?;
 
     let cwd = std::env::current_dir()?;
     let mut manifest = match find_manifest(&cwd) {
