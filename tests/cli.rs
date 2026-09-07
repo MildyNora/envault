@@ -168,6 +168,46 @@ fn run_injects_and_masks_output() {
     assert!(!stdout.contains("supersecret-value-9"));
 }
 
+#[cfg(unix)]
+#[test]
+fn run_masks_longer_secret_when_pty_output_splits_after_its_prefix() {
+    let te = TestEnv::new();
+    te.init();
+    for (alias, value) in [
+        ("prefix-key", "SYNTHETIC-PREFIX"),
+        ("long-key", "SYNTHETIC-PREFIX-TAIL-9988"),
+    ] {
+        te.envault()
+            .args(["add", alias, "--stdin"])
+            .write_stdin(value)
+            .assert()
+            .success();
+    }
+
+    let output = te
+        .envault()
+        .args([
+            "run",
+            "--env",
+            "PREFIX_KEY=prefix-key",
+            "--env",
+            "LONG_KEY=long-key",
+            "--",
+            "sh",
+            "-c",
+            "printf %s \"$PREFIX_KEY\"; sleep 0.1; printf %s '-TAIL-9988'",
+        ])
+        .assert()
+        .success();
+    let stdout = std::str::from_utf8(&output.get_output().stdout).unwrap();
+    assert_eq!(
+        stdout.trim_start_matches(['\r', '\n']),
+        "[envault:long-key]"
+    );
+    assert!(!stdout.contains("TAIL-9988"));
+    assert!(output.get_output().stderr.is_empty());
+}
+
 #[test]
 fn run_passes_exit_code_through() {
     let te = TestEnv::new();
