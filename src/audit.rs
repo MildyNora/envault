@@ -74,7 +74,10 @@ fn hex(bytes: &[u8]) -> String {
 /// on any I/O failure so the caller can fail closed when auditing is required.
 pub fn record(home: &Path, key: &[u8], action: &str, detail: &str) -> Result<()> {
     std::fs::create_dir_all(home)?;
-    let entries = read(home).unwrap_or_default();
+    let entries = read(home).context("reading the existing audit log")?;
+    if verify(home, key, &entries) != Integrity::Ok {
+        anyhow::bail!("audit log integrity check failed — refusing to append");
+    }
     let prev = entries.last().map(|e| e.hash.clone()).unwrap_or_default();
     let ts = crate::store::now_rfc3339();
     let hash = entry_mac(key, &ts, action, detail, &prev);
@@ -126,7 +129,7 @@ fn trim(home: &Path, key: &[u8]) -> Result<()> {
     let keep = &lines[lines.len() / 2..];
     std::fs::write(&path, format!("{}\n", keep.join("\n")))?;
     crate::platform::set_mode(&path, 0o600)?;
-    let entries = read(home).unwrap_or_default();
+    let entries = read(home)?;
     let last = entries.last().map(|e| e.hash.clone()).unwrap_or_default();
     write_head(home, key, entries.len(), &last)
 }
@@ -137,11 +140,14 @@ pub fn read(home: &Path) -> Result<Vec<Entry>> {
         return Ok(Vec::new());
     }
     let raw = std::fs::read_to_string(&path)?;
-    Ok(raw
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .filter_map(|l| serde_json::from_str::<Entry>(l).ok())
-        .collect())
+    raw.lines()
+        .enumerate()
+        .filter(|(_, line)| !line.trim().is_empty())
+        .map(|(index, line)| {
+            serde_json::from_str::<Entry>(line)
+                .with_context(|| format!("parsing audit log entry {}", index + 1))
+        })
+        .collect()
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -227,6 +233,68 @@ mod tests {
         let entries = read(home.path()).unwrap();
         assert_eq!(entries.len(), 2);
         assert_eq!(verify(home.path(), KEY, &entries), Integrity::HeadMismatch);
+    }
+
+    #[test]
+    fn refuses_to_append_after_tail_deletion() {
+        let home = TempDir::new().unwrap();
+        for d in ["a", "b", "c"] {
+            record(home.path(), KEY, "run", d).unwrap();
+        }
+
+        let raw = std::fs::read_to_string(log_file(home.path())).unwrap();
+        let kept: Vec<&str> = raw.lines().take(2).collect();
+        std::fs::write(log_file(home.path()), format!("{}\n", kept.join("\n"))).unwrap();
+        let truncated_log = std::fs::read(log_file(home.path())).unwrap();
+        let old_head = std::fs::read(head_file(home.path())).unwrap();
+
+        assert!(record(home.path(), KEY, "run", "d").is_err());
+        assert_eq!(std::fs::read(log_file(home.path())).unwrap(), truncated_log);
+        assert_eq!(std::fs::read(head_file(home.path())).unwrap(), old_head);
+    }
+
+    #[test]
+    fn refuses_to_append_after_whole_log_deletion() {
+        let home = TempDir::new().unwrap();
+        record(home.path(), KEY, "run", "a").unwrap();
+        record(home.path(), KEY, "run", "b").unwrap();
+        let old_head = std::fs::read(head_file(home.path())).unwrap();
+        std::fs::remove_file(log_file(home.path())).unwrap();
+
+        assert!(record(home.path(), KEY, "run", "c").is_err());
+        assert!(!log_file(home.path()).exists());
+        assert_eq!(std::fs::read(head_file(home.path())).unwrap(), old_head);
+    }
+
+    #[test]
+    fn refuses_to_append_to_malformed_log() {
+        let home = TempDir::new().unwrap();
+        record(home.path(), KEY, "run", "a").unwrap();
+        use std::io::Write;
+        let mut log = std::fs::OpenOptions::new()
+            .append(true)
+            .open(log_file(home.path()))
+            .unwrap();
+        log.write_all(b"not-json\n").unwrap();
+        drop(log);
+        let malformed_log = std::fs::read(log_file(home.path())).unwrap();
+        let old_head = std::fs::read(head_file(home.path())).unwrap();
+
+        assert!(record(home.path(), KEY, "run", "b").is_err());
+        assert_eq!(std::fs::read(log_file(home.path())).unwrap(), malformed_log);
+        assert_eq!(std::fs::read(head_file(home.path())).unwrap(), old_head);
+    }
+
+    #[test]
+    fn refuses_to_append_with_the_wrong_key() {
+        let home = TempDir::new().unwrap();
+        record(home.path(), KEY, "run", "a").unwrap();
+        let old_log = std::fs::read(log_file(home.path())).unwrap();
+        let old_head = std::fs::read(head_file(home.path())).unwrap();
+
+        assert!(record(home.path(), b"wrong-key", "run", "b").is_err());
+        assert_eq!(std::fs::read(log_file(home.path())).unwrap(), old_log);
+        assert_eq!(std::fs::read(head_file(home.path())).unwrap(), old_head);
     }
 
     #[test]
