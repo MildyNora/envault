@@ -12,7 +12,7 @@ use std::io::{IsTerminal, Write};
 use crate::crypto;
 use crate::paths;
 use crate::store::Vault;
-use app::{App, Effect};
+use app::{App, Effect, VaultChange};
 
 pub fn run_tui() -> Result<()> {
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
@@ -97,11 +97,7 @@ fn event_loop(app: &mut App, home: &std::path::Path) -> Result<()> {
         match effect {
             None => {}
             Some(Effect::Quit) => return Ok(()),
-            Some(Effect::Save) => {
-                if let Err(e) = app.vault.save(home) {
-                    app.set_error(format!("save failed: {e:#}"));
-                }
-            }
+            Some(Effect::Save(change)) => persist_vault_change(app, home, change),
             Some(Effect::Decrypt { alias }) => match decrypt(app, home, "reveal", &alias) {
                 Ok(value) => app.provide_plaintext(value),
                 Err(e) => app.set_error(format!("decrypt failed: {e:#}")),
@@ -159,6 +155,33 @@ fn event_loop(app: &mut App, home: &std::path::Path) -> Result<()> {
     }
 }
 
+fn persist_vault_change(app: &mut App, home: &std::path::Path, change: VaultChange) {
+    let saved = Vault::transaction(home, |vault| {
+        match change {
+            VaultChange::Insert(entry) => vault.insert(entry)?,
+            VaultChange::Update(entry) => {
+                let stored = vault
+                    .secrets
+                    .iter_mut()
+                    .find(|stored| stored.alias == entry.alias)
+                    .context("secret was removed before the edit could be saved")?;
+                *stored = entry;
+            }
+            VaultChange::Delete(alias) => vault.secrets.retain(|entry| entry.alias != alias),
+        }
+        Ok(())
+    });
+    match saved {
+        Ok(((), vault)) => app.reload_vault(vault),
+        Err(error) => {
+            if let Ok(vault) = Vault::load(home) {
+                app.reload_vault(vault);
+            }
+            app.set_error(format!("save failed: {error:#}"));
+        }
+    }
+}
+
 fn persist_settings(app: &mut App, home: &std::path::Path, label: &str) {
     let state = if label.contains("audit") {
         app.settings.audit_log
@@ -189,4 +212,42 @@ fn copy_with_autoclear(value: String) -> Result<()> {
         }
     });
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::{now_rfc3339, SecretEntry};
+    use tempfile::TempDir;
+
+    fn entry(alias: &str) -> SecretEntry {
+        SecretEntry {
+            alias: alias.into(),
+            label: alias.into(),
+            cipher: "synthetic-cipher".into(),
+            url: None,
+            created_at: now_rfc3339(),
+            updated_at: now_rfc3339(),
+            notes: String::new(),
+        }
+    }
+
+    #[test]
+    fn dashboard_save_preserves_an_external_addition() {
+        let home = TempDir::new().unwrap();
+        Vault::default().save(home.path()).unwrap();
+        let recipient = crypto::generate_identity().to_public();
+        let mut app = App::new(Vault::load(home.path()).unwrap(), recipient);
+
+        Vault::transaction(home.path(), |vault| vault.insert(entry("external"))).unwrap();
+        persist_vault_change(
+            &mut app,
+            home.path(),
+            VaultChange::Insert(entry("dashboard")),
+        );
+
+        let stored = Vault::load(home.path()).unwrap();
+        assert!(stored.get("external").is_some());
+        assert!(stored.get("dashboard").is_some());
+    }
 }

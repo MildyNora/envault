@@ -70,7 +70,7 @@ pub enum Mode {
 
 #[derive(Debug)]
 pub enum Effect {
-    Save,
+    Save(VaultChange),
     Decrypt { alias: String },
     Copy { alias: String },
     Rotate,
@@ -78,6 +78,13 @@ pub enum Effect {
     ToggleTouchId,
     ToggleFill,
     Quit,
+}
+
+#[derive(Debug)]
+pub enum VaultChange {
+    Insert(SecretEntry),
+    Update(SecretEntry),
+    Delete(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -316,7 +323,7 @@ impl App {
                 self.vault.secrets.retain(|s| s.alias != alias);
                 self.clamp_selection();
                 self.set_success(format!("deleted '{alias}'"));
-                return Some(Effect::Save);
+                return Some(Effect::Save(VaultChange::Delete(alias)));
             }
         }
         None
@@ -463,22 +470,27 @@ impl App {
                     }
                 }
             };
-            if let Some(entry) = self.vault.secrets.iter_mut().find(|s| s.alias == target) {
-                entry.label = if label.is_empty() {
-                    target.clone()
+            let updated =
+                if let Some(entry) = self.vault.secrets.iter_mut().find(|s| s.alias == target) {
+                    entry.label = if label.is_empty() {
+                        target.clone()
+                    } else {
+                        label
+                    };
+                    entry.url = if url.is_empty() { None } else { Some(url) };
+                    entry.notes = notes;
+                    if let Some(c) = cipher {
+                        entry.cipher = c;
+                    }
+                    entry.updated_at = now_rfc3339();
+                    entry.clone()
                 } else {
-                    label
+                    self.set_error(format!("name '{target}' no longer exists"));
+                    return None;
                 };
-                entry.url = if url.is_empty() { None } else { Some(url) };
-                entry.notes = notes;
-                if let Some(c) = cipher {
-                    entry.cipher = c;
-                }
-                entry.updated_at = now_rfc3339();
-            }
             self.set_success(format!("updated '{target}'"));
             self.mode = Mode::List;
-            return Some(Effect::Save);
+            return Some(Effect::Save(VaultChange::Update(updated)));
         }
         // Add
         if !is_valid_alias(&name) {
@@ -505,24 +517,23 @@ impl App {
             }
         };
         let now = now_rfc3339();
-        self.vault
-            .insert(SecretEntry {
-                label: if label.is_empty() {
-                    name.clone()
-                } else {
-                    label
-                },
-                alias: name.clone(),
-                cipher,
-                url: if url.is_empty() { None } else { Some(url) },
-                created_at: now.clone(),
-                updated_at: now,
-                notes,
-            })
-            .ok();
+        let entry = SecretEntry {
+            label: if label.is_empty() {
+                name.clone()
+            } else {
+                label
+            },
+            alias: name.clone(),
+            cipher,
+            url: if url.is_empty() { None } else { Some(url) },
+            created_at: now.clone(),
+            updated_at: now,
+            notes,
+        };
+        self.vault.insert(entry.clone()).ok()?;
         self.set_success(format!("added '{name}'"));
         self.mode = Mode::List;
-        Some(Effect::Save)
+        Some(Effect::Save(VaultChange::Insert(entry)))
     }
 }
 
@@ -636,7 +647,7 @@ mod tests {
         app.handle_key(key(KeyCode::Tab)); // label (2)
         type_str(&mut app, "New Key");
         let eff = app.handle_key(key(KeyCode::Enter));
-        assert!(matches!(eff, Some(Effect::Save)));
+        assert!(matches!(eff, Some(Effect::Save(_))));
         let entry = app.vault.get("new-key").expect("entry added");
         assert_eq!(entry.label, "New Key");
         assert_eq!(decrypt_value(&id, &entry.cipher).unwrap(), "fresh-value-77");
@@ -661,7 +672,7 @@ mod tests {
         app.handle_key(key(KeyCode::Tab)); // label (2)
         type_str(&mut app, "!"); // append to label
         let eff = app.handle_key(key(KeyCode::Enter));
-        assert!(matches!(eff, Some(Effect::Save)));
+        assert!(matches!(eff, Some(Effect::Save(_))));
         let entry = app.vault.get("a-key").unwrap();
         assert_eq!(entry.cipher, old_cipher);
         assert!(entry.label.ends_with('!'));

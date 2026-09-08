@@ -16,7 +16,7 @@ pub fn cmd_add(
         bail!("alias '{alias}' is invalid — use kebab-case: lowercase letters, digits, '-'");
     }
     let home = paths::envault_home();
-    let mut vault = Vault::load(&home)?;
+    let vault = Vault::load(&home)?;
     if vault.get(&alias).is_some() {
         bail!("alias '{alias}' already exists");
     }
@@ -38,7 +38,7 @@ pub fn cmd_add(
     let recipient = crypto::recipient_from_identity()?;
     let cipher = crypto::encrypt_value(&recipient, &value)?;
     let now = now_rfc3339();
-    vault.insert(SecretEntry {
+    let entry = SecretEntry {
         label: label.unwrap_or_else(|| alias.clone()),
         alias: alias.clone(),
         cipher,
@@ -46,8 +46,8 @@ pub fn cmd_add(
         created_at: now.clone(),
         updated_at: now,
         notes: notes.unwrap_or_default(),
-    })?;
-    vault.save(&home)?;
+    };
+    Vault::transaction(&home, move |vault| vault.insert(entry))?;
     println!("Added '{alias}' (encrypted; value not shown)");
     Ok(())
 }

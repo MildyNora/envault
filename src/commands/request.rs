@@ -169,28 +169,29 @@ fn finish(
         Outcome::Granted(value) => {
             let recipient = crypto::recipient_from_identity()?;
             let cipher = crypto::encrypt_value(&recipient, &value)?;
-            let mut vault = Vault::load(home)?;
-            if vault.get(&meta.name).is_none() {
-                let now = now_rfc3339();
-                vault.insert(SecretEntry {
-                    label: if meta.label.is_empty() {
-                        meta.name.clone()
-                    } else {
-                        meta.label.clone()
-                    },
-                    alias: meta.name.clone(),
-                    cipher,
-                    url: None,
-                    created_at: now.clone(),
-                    updated_at: now,
-                    notes: if meta.reason.is_empty() {
-                        String::new()
-                    } else {
-                        format!("requested by {}: {}", meta.agent, meta.reason)
-                    },
-                })?;
-                vault.save(home)?;
-            }
+            Vault::transaction(home, |vault| {
+                if vault.get(&meta.name).is_none() {
+                    let now = now_rfc3339();
+                    vault.insert(SecretEntry {
+                        label: if meta.label.is_empty() {
+                            meta.name.clone()
+                        } else {
+                            meta.label.clone()
+                        },
+                        alias: meta.name.clone(),
+                        cipher,
+                        url: None,
+                        created_at: now.clone(),
+                        updated_at: now,
+                        notes: if meta.reason.is_empty() {
+                            String::new()
+                        } else {
+                            format!("requested by {}: {}", meta.agent, meta.reason)
+                        },
+                    })?;
+                }
+                Ok(())
+            })?;
             println!("✔ added '{}' to the vault.", meta.name);
             (
                 ResultFile {

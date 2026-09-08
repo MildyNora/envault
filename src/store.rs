@@ -1,6 +1,8 @@
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::fs::{File, OpenOptions};
+use std::io::Write;
 use std::path::Path;
 
 use crate::paths::vault_file;
@@ -32,6 +34,14 @@ impl Vault {
                 path.display()
             );
         }
+        let lock = open_lock(home)?;
+        lock.lock_shared()
+            .with_context(|| format!("locking {} for reading", path.display()))?;
+        Self::load_unlocked(home)
+    }
+
+    fn load_unlocked(home: &Path) -> Result<Vault> {
+        let path = vault_file(home);
         let raw =
             fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
         serde_json::from_str(&raw).with_context(|| format!("parsing {}", path.display()))
@@ -39,9 +49,57 @@ impl Vault {
 
     pub fn save(&self, home: &Path) -> Result<()> {
         fs::create_dir_all(home)?;
+        let lock = open_lock(home)?;
+        lock.lock()
+            .with_context(|| format!("locking {} for writing", vault_file(home).display()))?;
+        self.save_unlocked(home)
+    }
+
+    /// Reload, mutate, and atomically persist the vault while holding one
+    /// inter-process lock. The returned vault is the exact committed state.
+    pub fn transaction<T>(
+        home: &Path,
+        mutate: impl FnOnce(&mut Vault) -> Result<T>,
+    ) -> Result<(T, Vault)> {
+        Self::with_exclusive(home, |mut vault| {
+            let result = mutate(&mut vault)?;
+            vault.save_unlocked(home)?;
+            Ok((result, vault))
+        })
+    }
+
+    /// Hold the same exclusive lock used by transactions for a specialized
+    /// whole-vault operation such as key rotation.
+    pub fn with_exclusive<T>(home: &Path, operation: impl FnOnce(Vault) -> Result<T>) -> Result<T> {
         let path = vault_file(home);
-        fs::write(&path, serde_json::to_string_pretty(self)?)?;
-        crate::platform::set_mode(&path, 0o600)?;
+        if !path.exists() {
+            bail!(
+                "no vault found at {} — run `envault init` first",
+                path.display()
+            );
+        }
+        let lock = open_lock(home)?;
+        lock.lock()
+            .with_context(|| format!("locking {} for writing", path.display()))?;
+        operation(Self::load_unlocked(home)?)
+    }
+
+    fn save_unlocked(&self, home: &Path) -> Result<()> {
+        let path = vault_file(home);
+        let staged = home.join("vault.json.tmp");
+        let mut file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&staged)
+            .with_context(|| format!("opening {}", staged.display()))?;
+        file.write_all(serde_json::to_string_pretty(self)?.as_bytes())
+            .with_context(|| format!("writing {}", staged.display()))?;
+        crate::platform::set_mode(&staged, 0o600)?;
+        file.sync_all()
+            .with_context(|| format!("syncing {}", staged.display()))?;
+        fs::rename(&staged, &path).with_context(|| format!("replacing {}", path.display()))?;
+        sync_parent(home)?;
         Ok(())
     }
 
@@ -57,6 +115,30 @@ impl Vault {
         self.secrets.sort_by_key(|s| s.alias.clone());
         Ok(())
     }
+}
+
+fn open_lock(home: &Path) -> Result<File> {
+    let path = home.join("vault.lock");
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&path)
+        .with_context(|| format!("opening {}", path.display()))?;
+    crate::platform::set_mode(&path, 0o600)?;
+    Ok(file)
+}
+
+#[cfg(unix)]
+fn sync_parent(home: &Path) -> Result<()> {
+    File::open(home)?.sync_all()?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn sync_parent(_home: &Path) -> Result<()> {
+    Ok(())
 }
 
 pub fn now_rfc3339() -> String {
@@ -99,6 +181,40 @@ mod tests {
         let loaded = Vault::load(home.path()).unwrap();
         assert_eq!(loaded.secrets.len(), 1);
         assert_eq!(loaded.get("openrouter").unwrap().label, "openrouter label");
+    }
+
+    #[test]
+    fn transaction_commits_the_latest_vault_atomically() {
+        let home = TempDir::new().unwrap();
+        Vault::default().save(home.path()).unwrap();
+
+        let (alias, committed) = Vault::transaction(home.path(), |vault| {
+            vault.insert(entry("new-key"))?;
+            Ok("new-key")
+        })
+        .unwrap();
+
+        assert_eq!(alias, "new-key");
+        assert!(committed.get("new-key").is_some());
+        assert!(Vault::load(home.path()).unwrap().get("new-key").is_some());
+        assert!(!home.path().join("vault.json.tmp").exists());
+    }
+
+    #[test]
+    fn failed_transaction_does_not_write_partial_mutation() {
+        let home = TempDir::new().unwrap();
+        Vault::default().save(home.path()).unwrap();
+
+        let result: Result<((), Vault)> = Vault::transaction(home.path(), |vault| {
+            vault.insert(entry("not-committed"))?;
+            bail!("synthetic failure")
+        });
+
+        assert!(result.is_err());
+        assert!(Vault::load(home.path())
+            .unwrap()
+            .get("not-committed")
+            .is_none());
     }
 
     #[test]

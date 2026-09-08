@@ -94,6 +94,53 @@ fn add_then_ls_shows_alias_but_never_value() {
 }
 
 #[test]
+fn concurrent_adds_both_survive() {
+    let te = TestEnv::new();
+    te.init();
+
+    let spawn_add = |alias: &str| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_envault"))
+            .env("ENVAULT_HOME", te.home.path())
+            .env("ENVAULT_IDENTITY_FILE", te.identity_file())
+            .current_dir(te.project.path())
+            .args(["add", alias, "--stdin"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap()
+    };
+
+    let mut first = spawn_add("concurrent-first");
+    let mut second = spawn_add("concurrent-second");
+    // `add` loads the vault before reading stdin. Let both processes reach the
+    // blocked read, then release them together so they mutate the same snapshot.
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    std::io::Write::write_all(
+        first.stdin.as_mut().unwrap(),
+        b"SYNTHETIC-CONCURRENT-FIRST-9988\n",
+    )
+    .unwrap();
+    std::io::Write::write_all(
+        second.stdin.as_mut().unwrap(),
+        b"SYNTHETIC-CONCURRENT-SECOND-7766\n",
+    )
+    .unwrap();
+    drop(first.stdin.take());
+    drop(second.stdin.take());
+
+    let first = first.wait_with_output().unwrap();
+    let second = second.wait_with_output().unwrap();
+    assert!(first.status.success(), "first add failed: {first:?}");
+    assert!(second.status.success(), "second add failed: {second:?}");
+
+    let out = te.envault().args(["ls", "--json"]).assert().success();
+    let listed: serde_json::Value = serde_json::from_slice(&out.get_output().stdout).unwrap();
+    let aliases = listed.as_array().unwrap();
+    assert_eq!(aliases.len(), 2, "both successful additions must remain");
+}
+
+#[test]
 fn add_rejects_bad_alias_and_duplicates() {
     let te = TestEnv::new();
     te.init();
