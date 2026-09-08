@@ -537,6 +537,49 @@ fn rotate_reencrypts_and_values_survive() {
 }
 
 #[test]
+fn audit_history_survives_repeated_identity_rotation() {
+    let te = TestEnv::new();
+    te.init();
+    te.envault()
+        .args(["add", "audited-key", "--stdin"])
+        .write_stdin("SYNTHETIC-AUDIT-ROTATION-9988\n")
+        .assert()
+        .success();
+    std::fs::write(
+        te.home.path().join("config.json"),
+        r#"{"audit_log":true,"touch_id":false,"fill":false}"#,
+    )
+    .unwrap();
+
+    let use_secret = || {
+        te.envault()
+            .args([
+                "run",
+                "--env",
+                "K=audited-key",
+                "--",
+                "sh",
+                "-c",
+                "test \"$K\" = \"SYNTHETIC-AUDIT-ROTATION-9988\"",
+            ])
+            .assert()
+            .success();
+    };
+
+    use_secret();
+    te.envault().arg("rotate").assert().success();
+    use_secret();
+    te.envault().arg("rotate").assert().success();
+    use_secret();
+
+    let lines = std::fs::read_to_string(te.home.path().join("audit.log")).unwrap();
+    assert_eq!(lines.lines().count(), 5);
+    let wrapped_key = std::fs::read_to_string(te.home.path().join("audit.key.age")).unwrap();
+    assert!(!wrapped_key.contains("AGE-SECRET-KEY"));
+    assert!(!te.home.path().join("audit.key.age.new").exists());
+}
+
+#[test]
 fn request_for_existing_secret_short_circuits() {
     let te = TestEnv::new();
     te.init();

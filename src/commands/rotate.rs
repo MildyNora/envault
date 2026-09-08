@@ -37,11 +37,15 @@ pub fn rotate_in_place(home: &Path) -> Result<RotateOutcome> {
     let staged = home.join("vault.json.new");
     fs::write(&staged, serde_json::to_string_pretty(&vault)?)?;
     crate::platform::set_mode(&staged, 0o600)?;
+    let audit_key = crate::audit::prepare_key_rotation(home, &old_identity, &new_identity)?;
 
     // Delete-then-create gives the new Keychain item a fresh ACL, so macOS
     // asks for authorization again: rotation revokes every prior grant.
     crypto::delete_identity()?;
     crypto::store_identity(&new_identity, home)?;
+    if let Some(audit_key) = audit_key {
+        audit_key.activate()?;
+    }
     fs::rename(&staged, paths::vault_file(home)).context("activating the rotated vault")?;
     crypto::store_recipient(&new_identity, home)?;
 

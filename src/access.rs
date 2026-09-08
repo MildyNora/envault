@@ -18,11 +18,11 @@ pub fn unlock(home: &Path, action: &str, detail: &str) -> Result<age::x25519::Id
     }
     let identity = crypto::load_identity()?;
     if s.audit_log {
-        // Key the log with the Keychain-protected identity so it can't be
-        // forged, and FAIL CLOSED: if we can't record the access, don't grant
-        // it (auditing was explicitly enabled). (M1)
-        let secret = identity.to_string();
-        audit::record(home, secret.expose_secret().as_bytes(), action, detail)
+        // The stable audit key is encrypted to the Keychain-protected identity
+        // so it can't be forged. FAIL CLOSED: if we can't record the access,
+        // don't grant it (auditing was explicitly enabled). (M1)
+        let key = audit::verification_key(home, &identity)?;
+        audit::record(home, key.expose_secret().as_bytes(), action, detail)
             .context("audit logging failed and auditing is enabled — refusing to proceed")?;
     }
     Ok(identity)

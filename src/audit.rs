@@ -2,16 +2,18 @@
 //!
 //! Cheap (one appended line per event, no daemon), small (auto-trimmed to a
 //! size cap), and tamper-evident: each entry carries an HMAC — keyed by the
-//! Keychain-protected identity — over its fields and the previous entry's MAC,
-//! and a separate MAC'd "head" anchor records the entry count + last MAC so
-//! truncation/deletion is detectable too. An adversary who cannot read the
-//! Keychain identity cannot forge, edit, or silently trim the log. It makes
-//! access visible; it does not prevent it.
+//! audit key, encrypted to the current Keychain-protected identity — over its
+//! fields and the previous entry's MAC, and a separate MAC'd "head" anchor
+//! records the entry count + last MAC so truncation/deletion is detectable too.
+//! An adversary who cannot read the Keychain identity cannot forge, edit, or
+//! silently trim the log. It makes access visible; it does not prevent it.
 
-use anyhow::{Context, Result};
+use age::secrecy::{ExposeSecret, SecretString};
+use anyhow::{bail, Context, Result};
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 type HmacSha256 = Hmac<Sha256>;
@@ -33,6 +35,18 @@ fn log_file(home: &Path) -> PathBuf {
 }
 fn head_file(home: &Path) -> PathBuf {
     home.join("audit.head")
+}
+fn key_file(home: &Path) -> PathBuf {
+    home.join("audit.key.age")
+}
+fn staged_key_file(home: &Path) -> PathBuf {
+    home.join("audit.key.age.new")
+}
+fn staged_log_file(home: &Path) -> PathBuf {
+    home.join("audit.log.new")
+}
+fn staged_head_file(home: &Path) -> PathBuf {
+    home.join("audit.head.new")
 }
 
 fn mac(key: &[u8], parts: &[&[u8]]) -> String {
@@ -89,7 +103,6 @@ pub fn record(home: &Path, key: &[u8], action: &str, detail: &str) -> Result<()>
     let path = log_file(home);
     let mut line = serde_json::to_string(&entry)?;
     line.push('\n');
-    use std::io::Write;
     let mut f = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -137,11 +150,14 @@ pub fn read(home: &Path) -> Result<Vec<Entry>> {
         return Ok(Vec::new());
     }
     let raw = std::fs::read_to_string(&path)?;
-    Ok(raw
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .filter_map(|l| serde_json::from_str::<Entry>(l).ok())
-        .collect())
+    raw.lines()
+        .enumerate()
+        .filter(|(_, line)| !line.trim().is_empty())
+        .map(|(index, line)| {
+            serde_json::from_str::<Entry>(line)
+                .with_context(|| format!("parsing audit entry {}", index + 1))
+        })
+        .collect()
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -173,6 +189,178 @@ pub fn verify(home: &Path, key: &[u8], entries: &[Entry]) -> Integrity {
         Err(_) if entries.is_empty() => Integrity::Ok,
         _ => Integrity::HeadMismatch,
     }
+}
+
+/// Return the audit-MAC key for the active identity. Legacy vaults use the
+/// identity itself until their first rotation migrates to a stable derived key;
+/// that key is then re-encrypted to each new recipient.
+pub fn verification_key(home: &Path, identity: &age::x25519::Identity) -> Result<SecretString> {
+    let primary = key_file(home);
+    match std::fs::read_to_string(&primary) {
+        Ok(cipher) => match crate::crypto::decrypt_value(identity, &cipher) {
+            Ok(key) => Ok(key.into()),
+            Err(primary_error) => {
+                // A failed rotation may have stored the new identity just
+                // before activating the staged wrapper. Keep audit access
+                // fail-safe and recoverable across that narrow window.
+                let staged = staged_key_file(home);
+                match std::fs::read_to_string(&staged) {
+                    Ok(cipher) => crate::crypto::decrypt_value(identity, &cipher)
+                        .map(Into::into)
+                        .context("decrypting the staged audit verification key"),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        Err(primary_error).context("decrypting the audit verification key")
+                    }
+                    Err(error) => {
+                        Err(error).with_context(|| format!("reading {}", staged.display()))
+                    }
+                }
+            }
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let staged = staged_key_file(home);
+            match std::fs::read_to_string(&staged) {
+                Ok(cipher) => match crate::crypto::decrypt_value(identity, &cipher) {
+                    Ok(key) => Ok(key.into()),
+                    // The identity swap may not have happened yet. With no
+                    // active wrapper this remains a legacy identity-keyed log.
+                    Err(_) => Ok(identity.to_string()),
+                },
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    Ok(identity.to_string())
+                }
+                Err(error) => Err(error).with_context(|| format!("reading {}", staged.display())),
+            }
+        }
+        Err(error) => Err(error).with_context(|| format!("reading {}", primary.display())),
+    }
+}
+
+struct StagedFile {
+    staged: PathBuf,
+    target: PathBuf,
+}
+
+/// Encrypted audit-key state prepared for a new vault identity. Activation is
+/// deliberately separate so verification happens before the identity swap.
+pub struct PreparedKeyRotation {
+    files: Vec<StagedFile>,
+}
+
+impl PreparedKeyRotation {
+    pub fn activate(self) -> Result<()> {
+        for file in self.files {
+            std::fs::rename(&file.staged, &file.target)
+                .with_context(|| format!("activating {}", file.target.display()))?;
+        }
+        Ok(())
+    }
+}
+
+fn derived_key(identity: &age::x25519::Identity) -> SecretString {
+    let identity = identity.to_string();
+    let mut digest = Sha256::new();
+    digest.update(b"envault audit key v1\0");
+    digest.update(identity.expose_secret().as_bytes());
+    hex(&digest.finalize()).into()
+}
+
+fn stage_file(staged: PathBuf, target: PathBuf, contents: &[u8]) -> Result<StagedFile> {
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&staged)
+        .with_context(|| format!("opening {}", staged.display()))?;
+    file.write_all(contents)
+        .with_context(|| format!("writing {}", staged.display()))?;
+    crate::platform::set_mode(&staged, 0o600)?;
+    file.sync_all()
+        .with_context(|| format!("syncing {}", staged.display()))?;
+    Ok(StagedFile { staged, target })
+}
+
+fn resign(entries: &mut [Entry], key: &[u8]) {
+    let mut prev = entries
+        .first()
+        .map(|entry| entry.prev.clone())
+        .unwrap_or_default();
+    for entry in entries {
+        entry.prev = prev;
+        entry.hash = entry_mac(key, &entry.ts, &entry.action, &entry.detail, &entry.prev);
+        prev = entry.hash.clone();
+    }
+}
+
+/// Verify the existing audit state and wrap its MAC key to the new identity.
+/// Legacy logs migrate once to a one-way derived key so rotation never retains
+/// a decrypt-capable retired private identity.
+pub fn prepare_key_rotation(
+    home: &Path,
+    old_identity: &age::x25519::Identity,
+    new_identity: &age::x25519::Identity,
+) -> Result<Option<PreparedKeyRotation>> {
+    let has_state = log_file(home).exists() || head_file(home).exists() || key_file(home).exists();
+    if !has_state {
+        return Ok(None);
+    }
+
+    let current_key = verification_key(home, old_identity)?;
+    let mut entries = read(home)?;
+    match verify(home, current_key.expose_secret().as_bytes(), &entries) {
+        Integrity::Ok => {}
+        Integrity::Broken(index) => {
+            bail!("refusing rotation: audit entry {index} failed verification")
+        }
+        Integrity::HeadMismatch => {
+            bail!("refusing rotation: audit head anchor does not match the log")
+        }
+    }
+
+    let legacy = !key_file(home).exists();
+    let next_key = if legacy {
+        derived_key(new_identity)
+    } else {
+        current_key
+    };
+    let mut files = Vec::new();
+
+    if legacy {
+        resign(&mut entries, next_key.expose_secret().as_bytes());
+        if log_file(home).exists() {
+            let mut raw = String::new();
+            for entry in &entries {
+                raw.push_str(&serde_json::to_string(entry)?);
+                raw.push('\n');
+            }
+            files.push(stage_file(
+                staged_log_file(home),
+                log_file(home),
+                raw.as_bytes(),
+            )?);
+        }
+        if head_file(home).exists() || !entries.is_empty() {
+            let last = entries
+                .last()
+                .map(|entry| entry.hash.as_str())
+                .unwrap_or("");
+            let head = head_mac(next_key.expose_secret().as_bytes(), entries.len(), last);
+            files.push(stage_file(
+                staged_head_file(home),
+                head_file(home),
+                head.as_bytes(),
+            )?);
+        }
+    }
+
+    let cipher = crate::crypto::encrypt_value(&new_identity.to_public(), next_key.expose_secret())?;
+    files.push(stage_file(
+        staged_key_file(home),
+        key_file(home),
+        cipher.as_bytes(),
+    )?);
+
+    Ok(Some(PreparedKeyRotation { files }))
 }
 
 #[cfg(test)]
@@ -239,5 +427,129 @@ mod tests {
             verify(home.path(), b"wrong-key", &entries),
             Integrity::Broken(0)
         );
+    }
+
+    #[test]
+    fn entries_remain_verifiable_after_key_rotation() {
+        let home = TempDir::new().unwrap();
+        let old_identity = crate::crypto::generate_identity();
+        let new_identity = crate::crypto::generate_identity();
+        let old_key = old_identity.to_string();
+        record(
+            home.path(),
+            old_key.expose_secret().as_bytes(),
+            "run",
+            "before rotation",
+        )
+        .unwrap();
+        let original_entries = read(home.path()).unwrap();
+
+        let prepared = prepare_key_rotation(home.path(), &old_identity, &new_identity)
+            .unwrap()
+            .unwrap();
+        let old_key_while_staged = verification_key(home.path(), &old_identity).unwrap();
+        assert_eq!(
+            old_key_while_staged.expose_secret(),
+            old_key.expose_secret(),
+            "staging alone must not switch a legacy vault's audit key"
+        );
+        prepared.activate().unwrap();
+
+        let entries = read(home.path()).unwrap();
+        let new_key = verification_key(home.path(), &new_identity).unwrap();
+        assert_eq!(
+            verify(home.path(), new_key.expose_secret().as_bytes(), &entries),
+            Integrity::Ok
+        );
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| (&entry.ts, &entry.action, &entry.detail))
+                .collect::<Vec<_>>(),
+            original_entries
+                .iter()
+                .map(|entry| (&entry.ts, &entry.action, &entry.detail))
+                .collect::<Vec<_>>(),
+            "rotation must preserve the historical events"
+        );
+        let wrapped = std::fs::read_to_string(key_file(home.path())).unwrap();
+        let stored_key = crate::crypto::decrypt_value(&new_identity, &wrapped).unwrap();
+        assert_ne!(stored_key, *old_key.expose_secret());
+
+        let newest_identity = crate::crypto::generate_identity();
+        let migrated_log = std::fs::read(log_file(home.path())).unwrap();
+        prepare_key_rotation(home.path(), &new_identity, &newest_identity)
+            .unwrap()
+            .unwrap()
+            .activate()
+            .unwrap();
+        let newest_key = verification_key(home.path(), &newest_identity).unwrap();
+        assert_eq!(
+            verify(home.path(), newest_key.expose_secret().as_bytes(), &entries),
+            Integrity::Ok
+        );
+        assert_eq!(
+            std::fs::read(log_file(home.path())).unwrap(),
+            migrated_log,
+            "later rotations only rewrap the stable audit key"
+        );
+    }
+
+    #[test]
+    fn key_rotation_refuses_a_truncated_audit_log() {
+        let home = TempDir::new().unwrap();
+        let old_identity = crate::crypto::generate_identity();
+        let new_identity = crate::crypto::generate_identity();
+        let old_key = old_identity.to_string();
+        for detail in ["first", "second"] {
+            record(
+                home.path(),
+                old_key.expose_secret().as_bytes(),
+                "run",
+                detail,
+            )
+            .unwrap();
+        }
+        let raw = std::fs::read_to_string(log_file(home.path())).unwrap();
+        std::fs::write(
+            log_file(home.path()),
+            format!("{}\n", raw.lines().next().unwrap()),
+        )
+        .unwrap();
+
+        let error = prepare_key_rotation(home.path(), &old_identity, &new_identity)
+            .err()
+            .expect("truncated audit must block rotation");
+        assert!(error.to_string().contains("head anchor"), "{error:#}");
+        assert!(!staged_key_file(home.path()).exists());
+    }
+
+    #[test]
+    fn key_rotation_refuses_a_malformed_audit_entry() {
+        let home = TempDir::new().unwrap();
+        let old_identity = crate::crypto::generate_identity();
+        let new_identity = crate::crypto::generate_identity();
+        let old_key = old_identity.to_string();
+        record(
+            home.path(),
+            old_key.expose_secret().as_bytes(),
+            "run",
+            "valid",
+        )
+        .unwrap();
+        writeln!(
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(log_file(home.path()))
+                .unwrap(),
+            "malformed audit data"
+        )
+        .unwrap();
+
+        let error = prepare_key_rotation(home.path(), &old_identity, &new_identity)
+            .err()
+            .expect("malformed audit must block rotation");
+        assert!(error.to_string().contains("audit entry 2"), "{error:#}");
+        assert!(!staged_key_file(home.path()).exists());
     }
 }
