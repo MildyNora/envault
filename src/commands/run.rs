@@ -1,7 +1,8 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use std::io::{IsTerminal, Read, Write};
 use std::path::PathBuf;
+use std::process::Stdio;
 
 use crate::crypto;
 use crate::manifest::find_manifest;
@@ -14,6 +15,66 @@ pub struct RunArgs {
     pub env: Vec<String>,
     pub allow_missing: bool,
     pub command: Vec<String>,
+}
+
+fn pump_masked<R: Read>(
+    mut reader: R,
+    secrets: &[(String, String)],
+    read_error_is_eof: bool,
+) -> Result<()> {
+    let mut masker = Masker::new(secrets);
+    let mut stdout = std::io::stdout();
+    let mut buf = [0u8; 8192];
+    loop {
+        match reader.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                stdout.write_all(&masker.feed(&buf[..n]))?;
+                stdout.flush()?;
+            }
+            Err(_) if read_error_is_eof => break,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    stdout.write_all(&masker.flush())?;
+    stdout.flush()?;
+    Ok(())
+}
+
+fn run_with_piped_stdin(
+    args: &RunArgs,
+    cwd: &std::path::Path,
+    injected: &[(String, String, String)],
+    masker_input: &[(String, String)],
+) -> Result<i32> {
+    let mut cmd = std::process::Command::new(&args.command[0]);
+    cmd.args(&args.command[1..])
+        .current_dir(cwd)
+        // Inheriting the pipe gives the child the caller's exact byte stream.
+        // A PTY would echo and line-buffer it, then add a newline before EOF.
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for (var, _, value) in injected {
+        cmd.env(var, value);
+    }
+
+    let mut child = cmd.spawn().context("spawning command")?;
+    let child_stdout = child.stdout.take().context("child stdout")?;
+    let child_stderr = child.stderr.take().context("child stderr")?;
+    let stdout_secrets = masker_input.to_vec();
+    let stderr_secrets = masker_input.to_vec();
+    let stdout_pump = std::thread::spawn(move || pump_masked(child_stdout, &stdout_secrets, false));
+    let stderr_pump = std::thread::spawn(move || pump_masked(child_stderr, &stderr_secrets, false));
+
+    let status = child.wait().context("waiting for command")?;
+    stdout_pump
+        .join()
+        .map_err(|_| anyhow!("stdout pump panicked"))??;
+    stderr_pump
+        .join()
+        .map_err(|_| anyhow!("stderr pump panicked"))??;
+    Ok(status.code().unwrap_or(1))
 }
 
 /// Restores cooked mode even on early return / panic.
@@ -99,6 +160,13 @@ pub fn cmd_run(args: RunArgs) -> Result<i32> {
         .map(|(_, a, v)| (a.clone(), v.clone()))
         .collect();
 
+    // A pipe has byte-stream semantics, which a terminal cannot preserve.
+    // Keep the PTY only for genuinely interactive commands; both paths mask
+    // child output before forwarding it.
+    if !std::io::stdin().is_terminal() {
+        return run_with_piped_stdin(&args, &cwd, &injected, &masker_input);
+    }
+
     // 4. Spawn in a PTY.
     let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
     let pair = native_pty_system()
@@ -134,21 +202,10 @@ pub fn cmd_run(args: RunArgs) -> Result<i32> {
     });
 
     let _raw = RawGuard::enable();
-    let mut reader = pair.master.try_clone_reader().context("pty reader")?;
-    let mut masker = Masker::new(&masker_input);
-    let mut stdout = std::io::stdout();
-    let mut buf = [0u8; 8192];
-    loop {
-        match reader.read(&mut buf) {
-            Ok(0) | Err(_) => break, // EOF or pty closed
-            Ok(n) => {
-                stdout.write_all(&masker.feed(&buf[..n]))?;
-                stdout.flush()?;
-            }
-        }
-    }
-    stdout.write_all(&masker.flush())?;
-    stdout.flush()?;
+    let reader = pair.master.try_clone_reader().context("pty reader")?;
+    // PTY readers report an I/O error when the slave closes; preserve that
+    // established EOF behavior for interactive commands.
+    pump_masked(reader, &masker_input, true)?;
 
     let status = child.wait().context("waiting for command")?;
     Ok(status.exit_code() as i32)

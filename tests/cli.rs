@@ -157,13 +157,23 @@ fn run_injects_and_masks_output() {
 
     let out = te
         .envault()
-        .args(["run", "--", "sh", "-c", "echo got: $MY_KEY"])
+        .args([
+            "run",
+            "--",
+            "sh",
+            "-c",
+            "echo got: $MY_KEY; echo err: $MY_KEY >&2",
+        ])
         .assert()
         .success();
     let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
     assert!(
         stdout.contains("got: [envault:my-key]"),
         "stdout was: {stdout}"
+    );
+    assert!(
+        stdout.contains("err: [envault:my-key]"),
+        "stderr was not merged and masked: {stdout}"
     );
     assert!(!stdout.contains("supersecret-value-9"));
 }
@@ -176,6 +186,34 @@ fn run_passes_exit_code_through() {
         .args(["run", "--allow-missing", "--", "sh", "-c", "exit 3"])
         .assert()
         .code(3);
+}
+
+#[cfg(unix)]
+#[test]
+fn run_preserves_piped_stdin_bytes() {
+    let te = TestEnv::new();
+    te.init();
+
+    for input in [
+        b"no-final-newline".as_slice(),
+        b"line-one\nline-two\r\n\0\x01\x7f".as_slice(),
+        b"with-final-newline\n".as_slice(),
+    ] {
+        let expected = input.iter().map(|b| format!("{b:02x}")).collect::<String>();
+        te.envault()
+            .args([
+                "run",
+                "--allow-missing",
+                "--",
+                "sh",
+                "-c",
+                "od -An -v -tx1 | tr -d ' \\n'",
+            ])
+            .write_stdin(input)
+            .assert()
+            .success()
+            .stdout(expected);
+    }
 }
 
 #[test]
