@@ -1,4 +1,8 @@
 use assert_cmd::Command;
+#[cfg(unix)]
+use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+#[cfg(unix)]
+use std::io::Read;
 use std::path::PathBuf;
 use tempfile::TempDir;
 
@@ -184,28 +188,53 @@ fn run_masks_longer_secret_when_pty_output_splits_after_its_prefix() {
             .success();
     }
 
-    let output = te
-        .envault()
-        .args([
-            "run",
-            "--env",
-            "PREFIX_KEY=prefix-key",
-            "--env",
-            "LONG_KEY=long-key",
-            "--",
-            "sh",
-            "-c",
-            "printf %s \"$PREFIX_KEY\"; sleep 0.1; printf %s '-TAIL-9988'",
-        ])
-        .assert()
-        .success();
-    let stdout = std::str::from_utf8(&output.get_output().stdout).unwrap();
-    assert_eq!(
-        stdout.trim_start_matches(['\r', '\n']),
-        "[envault:long-key]"
-    );
-    assert!(!stdout.contains("TAIL-9988"));
-    assert!(output.get_output().stderr.is_empty());
+    // Keep a real terminal input open so this exercises the interactive PTY
+    // path without triggering the nonterminal stdin bridge's EOF echo.
+    let pair = native_pty_system()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .unwrap();
+    let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_envault"));
+    cmd.args([
+        "run",
+        "--env",
+        "PREFIX_KEY=prefix-key",
+        "--env",
+        "LONG_KEY=long-key",
+        "--",
+        "sh",
+        "-c",
+        "printf %s \"$PREFIX_KEY\"; sleep 0.1; printf %s '-TAIL-9988'",
+    ]);
+    cmd.cwd(te.project.path());
+    cmd.env("ENVAULT_HOME", te.home.path());
+    cmd.env("ENVAULT_IDENTITY_FILE", te.identity_file());
+
+    let mut child = pair.slave.spawn_command(cmd).unwrap();
+    drop(pair.slave);
+    let mut reader = pair.master.try_clone_reader().unwrap();
+    let writer = pair.master.take_writer().unwrap();
+    let reader_thread = std::thread::spawn(move || {
+        let mut output = Vec::new();
+        let mut buf = [0u8; 256];
+        while let Ok(n) = reader.read(&mut buf) {
+            if n == 0 {
+                break;
+            }
+            output.extend_from_slice(&buf[..n]);
+        }
+        output
+    });
+
+    let status = child.wait().unwrap();
+    let output = reader_thread.join().unwrap();
+    drop(writer);
+    assert!(status.success());
+    assert_eq!(output, b"[envault:long-key]");
 }
 
 #[test]
