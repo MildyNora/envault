@@ -2,8 +2,10 @@ use assert_cmd::Command;
 #[cfg(unix)]
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 #[cfg(unix)]
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::PathBuf;
+#[cfg(unix)]
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 #[test]
@@ -318,6 +320,88 @@ fn run_masks_multiline_secrets_after_pty_newline_conversion() {
             );
         }
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn run_streams_short_interactive_prompt_before_input() {
+    const PROMPT: &[u8] = b"Password: ";
+
+    let te = TestEnv::new();
+    te.init();
+    te.envault()
+        .args(["add", "prompt-secret", "--stdin"])
+        .write_stdin("SYNTHETIC-SECRET-PROMPT-9988\n")
+        .assert()
+        .success();
+
+    let pair = native_pty_system()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .unwrap();
+    let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_envault"));
+    cmd.args([
+        "run",
+        "--env",
+        "TEST_SECRET=prompt-secret",
+        "--",
+        "sh",
+        "-c",
+        "printf 'Password: '; IFS= read -r reply; printf '\\naccepted\\n'",
+    ]);
+    cmd.cwd(te.project.path());
+    cmd.env("ENVAULT_HOME", te.home.path());
+    cmd.env("ENVAULT_IDENTITY_FILE", te.identity_file());
+
+    let mut child = pair.slave.spawn_command(cmd).unwrap();
+    drop(pair.slave);
+    let mut reader = pair.master.try_clone_reader().unwrap();
+    let mut writer = pair.master.take_writer().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let reader_thread = std::thread::spawn(move || {
+        let mut buf = [0u8; 256];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) if tx.send(buf[..n].to_vec()).is_err() => break,
+                Ok(_) => {}
+            }
+        }
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut output_before_input = Vec::new();
+    while Instant::now() < deadline
+        && !output_before_input
+            .windows(PROMPT.len())
+            .any(|w| w == PROMPT)
+    {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(remaining) {
+            Ok(chunk) => output_before_input.extend(chunk),
+            Err(_) => break,
+        }
+    }
+    let prompt_was_visible = output_before_input
+        .windows(PROMPT.len())
+        .any(|w| w == PROMPT);
+
+    writer.write_all(b"answer\n").unwrap();
+    writer.flush().unwrap();
+    let status = child.wait().unwrap();
+    drop(writer);
+    reader_thread.join().unwrap();
+
+    assert!(status.success());
+    assert!(
+        prompt_was_visible,
+        "prompt was still hidden while the child waited for input; output: {:?}",
+        String::from_utf8_lossy(&output_before_input)
+    );
 }
 
 #[test]
