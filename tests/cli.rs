@@ -181,6 +181,9 @@ fn run_passes_exit_code_through() {
 #[cfg(unix)]
 #[test]
 fn run_masks_multiline_secrets_after_pty_newline_conversion() {
+    use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+    use std::io::Read;
+
     let te = TestEnv::new();
     te.init();
     for (alias, value) in [
@@ -198,27 +201,52 @@ fn run_masks_multiline_secrets_after_pty_newline_conversion() {
                 "stty opost {mode}; printf 'before|%s|after' \"$MULTILINE_KEY\"; \
                  printf '|stderr:%s|' \"$MULTILINE_KEY\" >&2"
             );
-            let output = te
-                .envault()
-                .args([
-                    "run",
-                    "--env",
-                    &format!("MULTILINE_KEY={alias}"),
-                    "--",
-                    "sh",
-                    "-c",
-                    &script,
-                ])
-                .assert()
-                .success();
-            // Closing the PTY input writer may prepend a blank line.
-            let stdout = std::str::from_utf8(&output.get_output().stdout).unwrap();
+            let pair = native_pty_system()
+                .openpty(PtySize {
+                    rows: 24,
+                    cols: 80,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                })
+                .unwrap();
+            // Keep envault on its PTY path, without translating its output again.
+            let mut cmd = CommandBuilder::new("sh");
+            cmd.args([
+                "-c",
+                "stty -onlcr && exec \"$@\"",
+                "sh",
+                env!("CARGO_BIN_EXE_envault"),
+                "run",
+                "--env",
+                &format!("MULTILINE_KEY={alias}"),
+                "--",
+                "sh",
+                "-c",
+                &script,
+            ]);
+            cmd.cwd(te.project.path());
+            cmd.env("ENVAULT_HOME", te.home.path());
+            cmd.env("ENVAULT_IDENTITY_FILE", te.identity_file());
+            let mut child = pair.slave.spawn_command(cmd).unwrap();
+            drop(pair.slave);
+            let mut reader = pair.master.try_clone_reader().unwrap();
+            let writer = pair.master.take_writer().unwrap();
+            let reader_thread = std::thread::spawn(move || {
+                let mut output = Vec::new();
+                reader.read_to_end(&mut output).unwrap();
+                output
+            });
+            let status = child.wait().unwrap();
+            let output = reader_thread.join().unwrap();
+            // Dropping the writer sends EOF bytes; keep it open through exit.
+            drop(writer);
+
+            assert!(status.success(), "alias {alias}, mode {mode}");
             assert_eq!(
-                stdout.trim_start_matches(['\r', '\n']),
-                format!("before|[envault:{alias}]|after|stderr:[envault:{alias}]|"),
+                output,
+                format!("before|[envault:{alias}]|after|stderr:[envault:{alias}]|").into_bytes(),
                 "alias {alias}, mode {mode}"
             );
-            assert!(output.get_output().stderr.is_empty());
         }
     }
 }
