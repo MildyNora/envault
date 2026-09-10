@@ -84,10 +84,8 @@ pub fn cmd_request(
             return finish(&home, &meta, outcome, None);
         }
         eprintln!(
-            "envault: couldn't open a request window ({e}). Ask the user to run:\n  \
-             {} request-window {}",
-            exe.display(),
-            session.display()
+            "envault: couldn't open a request window ({e}). Ask the user to run this in their \
+             own trusted terminal:\n  envault add {name}\nThen retry the request."
         );
         return Ok(6);
     }

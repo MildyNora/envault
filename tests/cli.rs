@@ -844,16 +844,47 @@ fn request_for_existing_secret_short_circuits() {
 }
 
 #[test]
-fn request_without_window_tells_agent_how_to_proceed() {
+fn request_without_window_gives_durable_recovery_guidance() {
     let te = TestEnv::new();
     te.init();
     // ENVAULT_NO_WINDOW forces the headless fallback (exit 6 + guidance)
-    te.envault()
+    let output = te
+        .envault()
         .env("ENVAULT_NO_WINDOW", "1")
         .args(["request", "newkey", "--reason", "need a new key"])
         .assert()
         .code(6)
-        .stderr(predicates::str::contains("request-window"));
+        .get_output()
+        .clone();
+
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("envault add newkey"), "stderr: {stderr}");
+    assert!(!stderr.contains("request-window"), "stderr: {stderr}");
+    assert!(!stderr.contains("request.json"), "stderr: {stderr}");
+
+    let requests = te.home.path().join("requests");
+    assert!(
+        !requests.exists() || std::fs::read_dir(requests).unwrap().next().is_none(),
+        "failed request left a stale session"
+    );
+
+    let add_output = te
+        .envault()
+        .args(["add", "newkey", "--stdin"])
+        .write_stdin("SYNTHETIC-SECRET-RECOVERY-9988\n")
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let add_stdout = String::from_utf8(add_output.stdout).unwrap();
+    assert!(add_stdout.contains("Added 'newkey'"), "{add_stdout}");
+    assert!(!add_stdout.contains("SYNTHETIC-SECRET-RECOVERY-9988"));
+    te.envault()
+        .env("ENVAULT_NO_WINDOW", "1")
+        .args(["request", "newkey", "--reason", "retry after recovery"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("already in the vault"));
 }
 
 #[test]
