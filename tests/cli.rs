@@ -264,6 +264,67 @@ fn import_dotenv_encrypts_links_and_reports() {
 }
 
 #[test]
+fn import_malformed_dotenv_hides_contents_and_leaves_files_unchanged() {
+    for malformed in [
+        "TOKEN=\"SYNTHETIC-SECRET-9988\n",
+        "TOKEN='SYNTHETIC-SECRET-9988\n",
+        "TOKEN=SYNTHETIC-SECRET-9988 trailing\n",
+        "BAD-KEY=SYNTHETIC-SECRET-9988\n",
+        "TOKEN=\"SYNTHETIC-SECRET-9988\nSECOND=SYNTHETIC-SECOND-9977\n",
+    ] {
+        let te = TestEnv::new();
+        te.init();
+        let env_file = te.project.path().join(".env");
+        let contents = format!("VALID_TOKEN=SYNTHETIC-VALID-9966\n{malformed}");
+        std::fs::write(&env_file, &contents).unwrap();
+        let vault_path = te.home.path().join("vault.json");
+        let vault_before = std::fs::read(&vault_path).unwrap();
+
+        // Exercise main's full anyhow error-chain formatting, not just Display
+        // on an outer context that could hide a secret-bearing inner error.
+        te.envault()
+            .args(["import", ".env"])
+            .assert()
+            .code(1)
+            .stdout("")
+            .stderr("error: parsing dotenv entry failed (contents omitted)\n");
+
+        assert_eq!(std::fs::read(&vault_path).unwrap(), vault_before);
+        assert!(!te.project.path().join("envault.toml").exists());
+        assert_eq!(std::fs::read_to_string(&env_file).unwrap(), contents);
+    }
+}
+
+#[test]
+fn import_invalid_utf8_hides_contents() {
+    let te = TestEnv::new();
+    te.init();
+    std::fs::write(
+        te.project.path().join(".env"),
+        b"TOKEN=SYNTHETIC-SECRET-9988\xff\n",
+    )
+    .unwrap();
+    te.envault()
+        .args(["import", ".env"])
+        .assert()
+        .code(1)
+        .stdout("")
+        .stderr("error: parsing dotenv entry failed (contents omitted)\n");
+}
+
+#[test]
+fn import_missing_file_keeps_reading_context() {
+    let te = TestEnv::new();
+    te.init();
+    te.envault()
+        .args(["import", "missing.env"])
+        .assert()
+        .code(1)
+        .stdout("")
+        .stderr(predicates::str::contains("reading missing.env"));
+}
+
+#[test]
 fn guard_check_blocks_vault_reads_and_allows_normal() {
     let te = TestEnv::new();
     te.envault()
