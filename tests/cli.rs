@@ -178,6 +178,79 @@ fn run_passes_exit_code_through() {
         .code(3);
 }
 
+#[cfg(unix)]
+#[test]
+fn run_masks_multiline_secrets_after_pty_newline_conversion() {
+    use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+    use std::io::Read;
+
+    let te = TestEnv::new();
+    te.init();
+    for (alias, value) in [
+        ("lf-key", "SYNTHETIC-FIRST-9988\nSYNTHETIC-LAST-7766"),
+        ("crlf-key", "SYNTHETIC-FIRST-9988\r\nSYNTHETIC-LAST-7766"),
+    ] {
+        te.envault()
+            .args(["add", alias, "--stdin"])
+            .write_stdin(value)
+            .assert()
+            .success();
+        // Exercise the actual PTY with translation enabled and disabled.
+        for mode in ["onlcr", "-onlcr"] {
+            let script = format!(
+                "stty opost {mode}; printf 'before|%s|after' \"$MULTILINE_KEY\"; \
+                 printf '|stderr:%s|' \"$MULTILINE_KEY\" >&2"
+            );
+            let pair = native_pty_system()
+                .openpty(PtySize {
+                    rows: 24,
+                    cols: 80,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                })
+                .unwrap();
+            // Keep envault on its PTY path, without translating its output again.
+            let mut cmd = CommandBuilder::new("sh");
+            cmd.args([
+                "-c",
+                "stty -onlcr && exec \"$@\"",
+                "sh",
+                env!("CARGO_BIN_EXE_envault"),
+                "run",
+                "--env",
+                &format!("MULTILINE_KEY={alias}"),
+                "--",
+                "sh",
+                "-c",
+                &script,
+            ]);
+            cmd.cwd(te.project.path());
+            cmd.env("ENVAULT_HOME", te.home.path());
+            cmd.env("ENVAULT_IDENTITY_FILE", te.identity_file());
+            let mut child = pair.slave.spawn_command(cmd).unwrap();
+            drop(pair.slave);
+            let mut reader = pair.master.try_clone_reader().unwrap();
+            let writer = pair.master.take_writer().unwrap();
+            let reader_thread = std::thread::spawn(move || {
+                let mut output = Vec::new();
+                reader.read_to_end(&mut output).unwrap();
+                output
+            });
+            let status = child.wait().unwrap();
+            let output = reader_thread.join().unwrap();
+            // Dropping the writer sends EOF bytes; keep it open through exit.
+            drop(writer);
+
+            assert!(status.success(), "alias {alias}, mode {mode}");
+            assert_eq!(
+                output,
+                format!("before|[envault:{alias}]|after|stderr:[envault:{alias}]|").into_bytes(),
+                "alias {alias}, mode {mode}"
+            );
+        }
+    }
+}
+
 #[test]
 fn run_fails_listing_all_missing_aliases() {
     let te = TestEnv::new();
