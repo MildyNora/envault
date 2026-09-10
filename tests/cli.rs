@@ -247,6 +247,79 @@ fn run_passes_exit_code_through() {
         .code(3);
 }
 
+#[cfg(unix)]
+#[test]
+fn run_masks_multiline_secrets_after_pty_newline_conversion() {
+    use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+    use std::io::Read;
+
+    let te = TestEnv::new();
+    te.init();
+    for (alias, value) in [
+        ("lf-key", "SYNTHETIC-FIRST-9988\nSYNTHETIC-LAST-7766"),
+        ("crlf-key", "SYNTHETIC-FIRST-9988\r\nSYNTHETIC-LAST-7766"),
+    ] {
+        te.envault()
+            .args(["add", alias, "--stdin"])
+            .write_stdin(value)
+            .assert()
+            .success();
+        // Exercise the actual PTY with translation enabled and disabled.
+        for mode in ["onlcr", "-onlcr"] {
+            let script = format!(
+                "stty opost {mode}; printf 'before|%s|after' \"$MULTILINE_KEY\"; \
+                 printf '|stderr:%s|' \"$MULTILINE_KEY\" >&2"
+            );
+            let pair = native_pty_system()
+                .openpty(PtySize {
+                    rows: 24,
+                    cols: 80,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                })
+                .unwrap();
+            // Keep envault on its PTY path, without translating its output again.
+            let mut cmd = CommandBuilder::new("sh");
+            cmd.args([
+                "-c",
+                "stty -onlcr && exec \"$@\"",
+                "sh",
+                env!("CARGO_BIN_EXE_envault"),
+                "run",
+                "--env",
+                &format!("MULTILINE_KEY={alias}"),
+                "--",
+                "sh",
+                "-c",
+                &script,
+            ]);
+            cmd.cwd(te.project.path());
+            cmd.env("ENVAULT_HOME", te.home.path());
+            cmd.env("ENVAULT_IDENTITY_FILE", te.identity_file());
+            let mut child = pair.slave.spawn_command(cmd).unwrap();
+            drop(pair.slave);
+            let mut reader = pair.master.try_clone_reader().unwrap();
+            let writer = pair.master.take_writer().unwrap();
+            let reader_thread = std::thread::spawn(move || {
+                let mut output = Vec::new();
+                reader.read_to_end(&mut output).unwrap();
+                output
+            });
+            let status = child.wait().unwrap();
+            let output = reader_thread.join().unwrap();
+            // Dropping the writer sends EOF bytes; keep it open through exit.
+            drop(writer);
+
+            assert!(status.success(), "alias {alias}, mode {mode}");
+            assert_eq!(
+                output,
+                format!("before|[envault:{alias}]|after|stderr:[envault:{alias}]|").into_bytes(),
+                "alias {alias}, mode {mode}"
+            );
+        }
+    }
+}
+
 #[test]
 fn run_fails_listing_all_missing_aliases() {
     let te = TestEnv::new();
@@ -330,6 +403,67 @@ fn import_dotenv_encrypts_links_and_reports() {
         .assert()
         .success()
         .stdout(predicates::str::contains("skipped 2"));
+}
+
+#[test]
+fn import_malformed_dotenv_hides_contents_and_leaves_files_unchanged() {
+    for malformed in [
+        "TOKEN=\"SYNTHETIC-SECRET-9988\n",
+        "TOKEN='SYNTHETIC-SECRET-9988\n",
+        "TOKEN=SYNTHETIC-SECRET-9988 trailing\n",
+        "BAD-KEY=SYNTHETIC-SECRET-9988\n",
+        "TOKEN=\"SYNTHETIC-SECRET-9988\nSECOND=SYNTHETIC-SECOND-9977\n",
+    ] {
+        let te = TestEnv::new();
+        te.init();
+        let env_file = te.project.path().join(".env");
+        let contents = format!("VALID_TOKEN=SYNTHETIC-VALID-9966\n{malformed}");
+        std::fs::write(&env_file, &contents).unwrap();
+        let vault_path = te.home.path().join("vault.json");
+        let vault_before = std::fs::read(&vault_path).unwrap();
+
+        // Exercise main's full anyhow error-chain formatting, not just Display
+        // on an outer context that could hide a secret-bearing inner error.
+        te.envault()
+            .args(["import", ".env"])
+            .assert()
+            .code(1)
+            .stdout("")
+            .stderr("error: parsing dotenv entry failed (contents omitted)\n");
+
+        assert_eq!(std::fs::read(&vault_path).unwrap(), vault_before);
+        assert!(!te.project.path().join("envault.toml").exists());
+        assert_eq!(std::fs::read_to_string(&env_file).unwrap(), contents);
+    }
+}
+
+#[test]
+fn import_invalid_utf8_hides_contents() {
+    let te = TestEnv::new();
+    te.init();
+    std::fs::write(
+        te.project.path().join(".env"),
+        b"TOKEN=SYNTHETIC-SECRET-9988\xff\n",
+    )
+    .unwrap();
+    te.envault()
+        .args(["import", ".env"])
+        .assert()
+        .code(1)
+        .stdout("")
+        .stderr("error: parsing dotenv entry failed (contents omitted)\n");
+}
+
+#[test]
+fn import_missing_file_keeps_reading_context() {
+    let te = TestEnv::new();
+    te.init();
+    te.envault()
+        .args(["import", "missing.env"])
+        .assert()
+        .code(1)
+        .stdout("")
+        .stderr(predicates::str::contains("reading missing.env"));
 }
 
 #[test]

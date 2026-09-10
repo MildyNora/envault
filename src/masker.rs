@@ -34,6 +34,10 @@ impl Masker {
             // Cover the common re-encodings a value might appear in. (L1)
             let mut forms: Vec<Vec<u8>> = vec![
                 value.clone().into_bytes(),
+                // PTY ONLCR output processing inserts CR before each LF,
+                // even in an existing CRLF. Keep both forms so raw-mode
+                // output is still masked without rewriting unrelated bytes.
+                value.replace('\n', "\r\n").into_bytes(),
                 B64.encode(value).into_bytes(),
                 B64_NP.encode(value).into_bytes(),
                 B64U.encode(value).into_bytes(),
@@ -194,6 +198,51 @@ mod tests {
         let mut out = eof.feed(b"SYNTHETIC-PREFIX");
         out.extend(eof.flush());
         assert_eq!(String::from_utf8(out).unwrap(), "[envault:short]");
+    }
+
+    #[test]
+    fn masks_pty_newline_forms() {
+        for value in [
+            "SYNTHETIC-FIRST\nSYNTHETIC-LAST",
+            "SYNTHETIC-FIRST\r\nSYNTHETIC-LAST",
+            "SYNTHETIC-FIRST\n\nMIDDLE\r\nSYNTHETIC-LAST\n",
+        ] {
+            // ONLCR inserts CR before every LF, including one preceded by CR.
+            let translated = value.replace('\n', "\r\n");
+            for form in [value, translated.as_str()] {
+                let input = format!("before\r\n{form}|after\r\n");
+                let expected = "before\r\n[envault:multiline]|after\r\n";
+                for split in 0..=input.len() {
+                    let mut m = one("multiline", value);
+                    let mut out = m.feed(&input.as_bytes()[..split]);
+                    out.extend(m.feed(&input.as_bytes()[split..]));
+                    out.extend(m.flush());
+                    assert_eq!(out, expected.as_bytes(), "split {split}");
+                }
+                let mut m = one("multiline", value);
+                let mut out = Vec::new();
+                for byte in input.as_bytes() {
+                    out.extend(m.feed(&[*byte]));
+                }
+                out.extend(m.flush());
+                assert_eq!(out, expected.as_bytes());
+            }
+        }
+    }
+
+    #[test]
+    fn pty_newline_masking_preserves_unrelated_bytes() {
+        let mut m = one("multiline", "SYNTHETIC-FIRST\nSYNTHETIC-LAST");
+        let input = b"ordinary\ntext\r\nwith\r\r\nnewlines\r";
+        let mut out = m.feed(input);
+        out.extend(m.flush());
+        assert_eq!(out, input);
+    }
+
+    #[test]
+    fn pty_expansion_does_not_change_short_value_policy() {
+        let mut m = one("short", "a\nb\nc");
+        assert_eq!(mask_all(&mut m, b"a\r\nb\r\nc"), "a\r\nb\r\nc");
     }
 
     #[test]
