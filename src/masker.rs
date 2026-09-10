@@ -296,4 +296,18 @@ mod tests {
         out.extend(m.flush());
         assert_eq!(String::from_utf8(out).unwrap(), "tail sk-or-v1");
     }
+
+    #[test]
+    fn nonmatching_short_prompt_is_emitted_immediately() {
+        let mut m = one("long", "SYNTHETIC-SECRET-PROMPT-9988");
+        assert_eq!(m.feed(b"Password: "), b"Password: ");
+        assert!(m.flush().is_empty());
+    }
+
+    #[test]
+    fn prompt_only_holds_a_trailing_secret_prefix() {
+        let mut m = one("long", "SYNTHETIC-SECRET-PROMPT-9988");
+        assert_eq!(m.feed(b"Password: SYNTHETIC-SEC"), b"Password: ");
+        assert_eq!(m.flush(), b"SYNTHETIC-SEC");
+    }
 }
