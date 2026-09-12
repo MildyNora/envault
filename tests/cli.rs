@@ -1160,3 +1160,150 @@ fn init_if_needed_is_idempotent() {
         .success()
         .stdout(predicates::str::contains("already initialized"));
 }
+
+#[test]
+fn empty_legacy_explicit_init_preserves_old_keys_and_allows_first_add() {
+    use age::secrecy::ExposeSecret;
+    use base64::Engine;
+    use sha2::{Digest, Sha256};
+    use std::str::FromStr;
+    for path_scoped in [false, true] {
+        for mirror in [
+            None,
+            Some("malformed".to_owned()),
+            Some(age::x25519::Identity::generate().to_public().to_string()),
+        ] {
+            let te = TestEnv::new();
+            let credentials = TempDir::new().unwrap();
+            let old = age::x25519::Identity::generate();
+            let account = if path_scoped {
+                let home = std::fs::canonicalize(te.home.path()).unwrap();
+                format!(
+                    "age-identity-{:x}",
+                    Sha256::digest(home.as_os_str().as_encoded_bytes())
+                )
+            } else {
+                "age-identity".to_owned()
+            };
+            let raw = old.to_string().expose_secret().to_owned();
+            std::fs::write(credentials.path().join(&account), &raw).unwrap();
+            // Another migrated vault's association and old historical ciphertext.
+            let other = format!("age-identity-v2-{}", "b".repeat(64));
+            std::fs::write(credentials.path().join(&other), &raw).unwrap();
+            let historical = age::encrypt(&old.to_public(), b"synthetic-history").unwrap();
+            let empty = b"{\"secrets\":[]}";
+            std::fs::write(te.home.path().join("vault.json"), empty).unwrap();
+            if let Some(value) = &mirror {
+                std::fs::write(te.home.path().join("recipient.txt"), value).unwrap();
+            }
+            let command = || {
+                let mut c = te.envault();
+                c.env("ENVAULT_IDENTITY_DIR", credentials.path());
+                c
+            };
+            command()
+                .args(["init", "--empty-legacy"])
+                .assert()
+                .success();
+            assert_eq!(
+                std::fs::read(te.home.path().join("vault.json")).unwrap(),
+                empty
+            );
+            assert_eq!(
+                std::fs::read_to_string(te.home.path().join("recipient.txt")).ok(),
+                mirror
+            );
+            command()
+                .args(["add", "first", "--stdin"])
+                .write_stdin("synthetic-first\n")
+                .assert()
+                .success();
+            let id = std::fs::read_to_string(te.home.path().join("identity-id")).unwrap();
+            let fresh = age::x25519::Identity::from_str(
+                std::fs::read_to_string(
+                    credentials
+                        .path()
+                        .join(format!("age-identity-v2-{}", id.trim())),
+                )
+                .unwrap()
+                .trim(),
+            )
+            .unwrap();
+            assert_ne!(fresh.to_public(), old.to_public());
+            let vault: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(te.home.path().join("vault.json")).unwrap())
+                    .unwrap();
+            let cipher = base64::engine::general_purpose::STANDARD
+                .decode(vault["secrets"][0]["cipher"].as_str().unwrap())
+                .unwrap();
+            assert_eq!(age::decrypt(&fresh, &cipher).unwrap(), b"synthetic-first");
+            assert!(age::decrypt(&old, &cipher).is_err());
+            for name in [&account, &other] {
+                assert_eq!(
+                    std::fs::read_to_string(credentials.path().join(name)).unwrap(),
+                    raw
+                );
+            }
+            assert_eq!(
+                age::decrypt(&old, &historical).unwrap(),
+                b"synthetic-history"
+            );
+        }
+    }
+}
+
+#[test]
+fn empty_legacy_explicit_init_rejects_ineligible_state_without_changes() {
+    for state in ["nonempty", "unreadable", "stable", "recovery"] {
+        let te = TestEnv::new();
+        let credentials = TempDir::new().unwrap();
+        let vault = te.home.path().join("vault.json");
+        if state == "unreadable" {
+            std::fs::create_dir(&vault).unwrap();
+        } else {
+            let bytes = if state == "nonempty" {
+                r#"{"secrets":[{"alias":"old","label":"Old","cipher":"preserve","created_at":"test","updated_at":"test"}]}"#
+            } else {
+                r#"{"secrets":[]}"#
+            };
+            std::fs::write(&vault, bytes).unwrap();
+        }
+        let before = std::fs::read(&vault).ok();
+        if state == "stable" || state == "recovery" {
+            let id = "a".repeat(64);
+            std::fs::write(te.home.path().join("identity-id"), &id).unwrap();
+            let prefix = if state == "stable" {
+                "age-identity-v2-"
+            } else {
+                "rotation-recovery-"
+            };
+            std::fs::write(credentials.path().join(format!("{prefix}{id}")), "preserve").unwrap();
+        }
+        let metadata = std::fs::read(te.home.path().join("identity-id")).ok();
+        let existing: Vec<_> = std::fs::read_dir(credentials.path())
+            .unwrap()
+            .map(|e| {
+                let p = e.unwrap().path();
+                let bytes = std::fs::read(&p).unwrap();
+                (p, bytes)
+            })
+            .collect();
+        te.envault()
+            .env("ENVAULT_IDENTITY_DIR", credentials.path())
+            .args(["init", "--empty-legacy"])
+            .assert()
+            .failure();
+        assert_eq!(std::fs::read(&vault).ok(), before);
+        assert_eq!(
+            std::fs::read(te.home.path().join("identity-id")).ok(),
+            metadata
+        );
+        assert_eq!(
+            std::fs::read_dir(credentials.path()).unwrap().count(),
+            existing.len()
+        );
+        for (p, bytes) in existing {
+            assert_eq!(std::fs::read(p).unwrap(), bytes);
+        }
+    }
+}

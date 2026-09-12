@@ -130,7 +130,7 @@ fn parse_matching_identity(raw: &str, home: &Path) -> Result<age::x25519::Identi
     let vault = crate::store::Vault::load(home)?;
     anyhow::ensure!(
         !vault.secrets.is_empty(),
-        "legacy migration needs encrypted entries to establish ownership; restore a nonempty backup"
+        "empty legacy vault: run `envault init --empty-legacy` to create a fresh identity; legacy credentials will be preserved"
     );
     for entry in &vault.secrets {
         decrypt_value(&identity, &entry.cipher)
@@ -211,6 +211,65 @@ fn migrate_identity(
         }
     }
     Ok(identity)
+}
+
+/// Explicit opt-in for a vault with no ciphertext from which to prove ownership.
+/// Never adopt or remove a legacy key; it may belong to another vault or backup.
+pub fn initialize_empty_legacy(home: &Path) -> Result<()> {
+    initialize_empty_legacy_using(home, set_credential)
+}
+
+fn initialize_empty_legacy_using(
+    home: &Path,
+    write: impl FnOnce(&str, &str) -> Result<()>,
+) -> Result<()> {
+    let _generation = crate::store::lock_generation(home)?;
+    anyhow::ensure!(
+        crate::store::Vault::load(home)?.secrets.is_empty(),
+        "refusing empty-legacy initialization: vault contains secrets"
+    );
+    // Any identity metadata, including an unreadable/broken link, could name an
+    // active identity or pending rotation recovery. Do not enter recovery here.
+    match fs::symlink_metadata(crate::paths::identity_id_file(home)) {
+        Err(e) if e.kind() == ErrorKind::NotFound => {}
+        Err(e) => return Err(e).context("checking existing identity metadata"),
+        Ok(_) => anyhow::bail!(
+            "identity metadata already exists; preserve it and use normal access or recovery"
+        ),
+    }
+    let identity = generate_identity();
+    let id = new_vault_id();
+    let account = stable_identity_account(&id);
+    anyhow::ensure!(
+        get_credential(&account)?.is_none()
+            && get_credential(&format!("rotation-recovery-{id}"))?.is_none(),
+        "identity or recovery credential already exists; refusing to replace it"
+    );
+    // Backend failures leave no identity-id, so the explicit operation is retryable.
+    write(&account, identity.to_string().expose_secret())?;
+    let saved = get_credential(&account)?.context("fresh identity was not persisted")?;
+    anyhow::ensure!(
+        parse_identity(&saved)?.to_public() == identity.to_public(),
+        "fresh identity verification failed"
+    );
+    // Publish complete metadata atomically without replacing an existing path.
+    // Interrupted attempts may leave an unreferenced fresh credential; old keys
+    // and the empty vault remain untouched and the operation can be retried.
+    let temporary = home.join(format!(".identity-id-{id}.new"));
+    let publish = (|| -> Result<()> {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
+        writeln!(file, "{id}")?;
+        file.sync_all()?;
+        crate::platform::set_mode(&temporary, 0o600)?;
+        fs::hard_link(&temporary, crate::paths::identity_id_file(home))
+            .context("publishing fresh identity metadata; preserve credentials and retry")?;
+        Ok(())
+    })();
+    let _ = fs::remove_file(temporary);
+    publish
 }
 
 pub fn store_identity(identity: &age::x25519::Identity, home: &Path) -> Result<()> {
@@ -787,5 +846,43 @@ mod tests {
         let current = crate::store::Vault::load(first.path()).unwrap();
         assert!(decrypt_value(&remaining, &current.secrets[0].cipher).is_err());
         assert!(get_credential(LEGACY_KEYCHAIN_ACCOUNT).unwrap().is_none());
+    }
+    #[test]
+    fn empty_legacy_backend_failure_is_retryable() {
+        let _env = test_env_lock();
+        let _creds = SyntheticCredentials::new();
+        for partial in [false, true] {
+            let home = tempfile::TempDir::new().unwrap();
+            crate::store::Vault::default().save(home.path()).unwrap();
+            let before = fs::read(crate::paths::vault_file(home.path())).unwrap();
+            let old = generate_identity();
+            set_credential(LEGACY_KEYCHAIN_ACCOUNT, old.to_string().expose_secret()).unwrap();
+            let result = initialize_empty_legacy_using(home.path(), |account, raw| {
+                // Includes a partial-success failure: the backend persisted the key
+                // but reported an error. No association may be published yet.
+                if partial {
+                    set_credential(account, raw)?;
+                }
+                anyhow::bail!("synthetic credential-write failure")
+            });
+            assert!(result.is_err());
+            assert!(!crate::paths::identity_id_file(home.path()).exists());
+            assert_eq!(
+                fs::read(crate::paths::vault_file(home.path())).unwrap(),
+                before
+            );
+            initialize_empty_legacy(home.path()).unwrap();
+            assert_ne!(
+                load_identity(home.path()).unwrap().to_public(),
+                old.to_public()
+            );
+            assert_eq!(
+                get_credential(LEGACY_KEYCHAIN_ACCOUNT)
+                    .unwrap()
+                    .unwrap()
+                    .trim(),
+                old.to_string().expose_secret()
+            );
+        }
     }
 }

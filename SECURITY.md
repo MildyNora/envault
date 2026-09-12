@@ -46,8 +46,21 @@ store.
 On first access, envault validates a legacy credential by decrypting the vault's
 entries under the generation lock, then copies it to the stable account. The
 public `recipient.txt` mirror never authorizes migration or overrides an existing
-stable credential. Empty legacy vaults cannot establish ownership from ciphertext;
-restore a nonempty backup before migration. A migrated path account is removed.
+stable credential. For an existing empty legacy vault, run `envault init
+--empty-legacy` with the same `ENVAULT_HOME` setting, then `envault add <alias>`.
+This explicit operation creates a fresh, separate identity under the generation
+lock without reading, copying or deleting shared/path legacy credentials. It
+leaves the empty vault and public mirror unchanged; mirror contents are irrelevant.
+It refuses nonempty vaults or any existing `identity-id`, including pending
+recovery metadata. It does not recover historical backups: those retain their
+original legacy key association. Preserve their credentials. The credential is stored and verified
+before complete metadata is published atomically without replacing an existing
+path. On backend failure before publication, repair the backend and rerun the
+same command. Interrupted attempts may retain unreferenced fresh credentials;
+legacy credentials remain untouched. Existing identity/recovery metadata must
+never be deleted to force another initialization.
+A nonempty legacy vault still proves ownership before migration; its migrated path
+account is removed.
 A shared legacy slot is retained until rotation because unmigrated vaults may
 still need it. Access every legacy vault before rotating any of them.
 
