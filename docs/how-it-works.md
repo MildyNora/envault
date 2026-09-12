@@ -34,7 +34,7 @@ while *structurally* denying it the plaintext.
   (Unix).
 - **Identity** — the age X25519 private key. Stored only in the **OS keychain**
   (macOS Keychain, Windows Credential Manager, Linux Secret Service; service
-  `envault`, with a separate account per canonical vault home). Never written
+  `envault`, with a separate account per stable vault identifier). Never written
   to disk in the clear.
 - **Recipient** — the public key, mirrored to `recipient.txt`, but treated as
   advisory only (see §4).

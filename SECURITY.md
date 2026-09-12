@@ -36,6 +36,25 @@ For the full picture see the README's
 [security model](README.md#security-model--the-safety-boundary) and
 [`docs/how-it-works.md`](docs/how-it-works.md).
 
+## Identity migration and revocation
+
+Each vault carries a public, stable `identity-id` file and uses it to select a
+separate OS credential account. Moving the complete vault directory therefore
+keeps its identity association. The private key remains only in the credential
+store.
+
+On first access, envault migrates a matching canonical-path credential to the
+stable account and removes the obsolete path-based copy. A matching legacy
+shared credential is copied but retained temporarily because another unmigrated
+vault may still depend on it. `envault rotate` removes every stored copy that
+matches the retired identity, including that legacy slot; users with multiple
+legacy vaults sharing one identity should access each vault to migrate it before
+rotating any of them. A mismatching credential is never adopted or deleted.
+
+If identity metadata survives but `vault.json` does not, initialization fails
+closed instead of replacing the private key. Restore the vault file from backup
+before retrying.
+
 ## Supported versions
 
 envault is pre-1.0; only the latest release line receives security fixes.

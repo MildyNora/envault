@@ -142,6 +142,68 @@ fn separate_homes_keep_separate_identities() {
 }
 
 #[test]
+fn moving_a_vault_keeps_its_identity_association() {
+    let parent = TempDir::new().unwrap();
+    let original_home = parent.path().join("original-home");
+    let moved_home = parent.path().join("moved-home");
+    std::fs::create_dir(&original_home).unwrap();
+    let project = TempDir::new().unwrap();
+    let credentials = TempDir::new().unwrap();
+    let legacy_identity = credentials.path().join("legacy-identity.txt");
+
+    let command = |home: &std::path::Path| {
+        let mut command = Command::cargo_bin("envault").unwrap();
+        command
+            .env("ENVAULT_HOME", home)
+            .env("ENVAULT_IDENTITY_DIR", credentials.path())
+            .env("ENVAULT_IDENTITY_FILE", &legacy_identity)
+            .current_dir(project.path());
+        command
+    };
+
+    command(&original_home).arg("init").assert().success();
+    command(&original_home)
+        .args(["add", "move-test", "--stdin"])
+        .write_stdin("SYNTHETIC-MOVE-IDENTITY-4477\n")
+        .assert()
+        .success();
+
+    std::fs::rename(&original_home, &moved_home).unwrap();
+    command(&moved_home)
+        .args([
+            "run",
+            "--env",
+            "MOVED=move-test",
+            "--",
+            "sh",
+            "-c",
+            "test \"$MOVED\" = SYNTHETIC-MOVE-IDENTITY-4477",
+        ])
+        .assert()
+        .success();
+}
+
+#[test]
+fn init_refuses_to_replace_an_identity_when_the_vault_is_missing() {
+    let te = TestEnv::new();
+    te.init();
+    let identity_before = std::fs::read(te.identity_file()).unwrap();
+    let recipient_before = std::fs::read(te.home.path().join("recipient.txt")).unwrap();
+    std::fs::remove_file(te.home.path().join("vault.json")).unwrap();
+
+    te.envault()
+        .arg("init")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("recovery required"));
+    assert_eq!(std::fs::read(te.identity_file()).unwrap(), identity_before);
+    assert_eq!(
+        std::fs::read(te.home.path().join("recipient.txt")).unwrap(),
+        recipient_before
+    );
+}
+
+#[test]
 fn add_then_ls_shows_alias_but_never_value() {
     let te = TestEnv::new();
     te.init();

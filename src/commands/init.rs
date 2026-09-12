@@ -19,6 +19,13 @@ pub fn cmd_init(if_needed: bool) -> Result<()> {
     }
     fs::create_dir_all(&home)?;
     crate::platform::set_mode(&home, 0o700)?;
+    if crypto::identity_recovery_present(&home)? {
+        bail!(
+            "vault recovery required at {}: identity metadata exists but vault.json is missing; \
+             refusing to replace the private key. Restore vault.json from backup before retrying",
+            home.display()
+        );
+    }
 
     let identity = crypto::generate_identity();
     crypto::store_identity(&identity, &home)?;
