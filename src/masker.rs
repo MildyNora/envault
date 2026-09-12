@@ -21,7 +21,6 @@ pub struct Masker {
     /// (pattern bytes, replacement bytes), longest pattern first
     patterns: Vec<(Vec<u8>, Vec<u8>)>,
     buf: Vec<u8>,
-    holdback: usize,
 }
 
 impl Masker {
@@ -35,6 +34,10 @@ impl Masker {
             // Cover the common re-encodings a value might appear in. (L1)
             let mut forms: Vec<Vec<u8>> = vec![
                 value.clone().into_bytes(),
+                // PTY ONLCR output processing inserts CR before each LF,
+                // even in an existing CRLF. Keep both forms so raw-mode
+                // output is still masked without rewriting unrelated bytes.
+                value.replace('\n', "\r\n").into_bytes(),
                 B64.encode(value).into_bytes(),
                 B64_NP.encode(value).into_bytes(),
                 B64U.encode(value).into_bytes(),
@@ -53,52 +56,61 @@ impl Masker {
         }
         // longest first, so a longer form wins when forms overlap
         patterns.sort_by_key(|(p, _)| std::cmp::Reverse(p.len()));
-        let holdback = patterns
-            .iter()
-            .map(|(p, _)| p.len())
-            .max()
-            .map_or(0, |m| m - 1);
         Masker {
             patterns,
             buf: Vec::new(),
-            holdback,
         }
     }
 
-    /// Replace every full pattern occurrence currently in the buffer.
-    /// Skips past inserted replacement text so replacements are never re-scanned,
-    /// and a pattern can never span the emit boundary because `holdback` is at
-    /// least every pattern length minus one.
-    fn replace_in_buf(&mut self) {
-        let mut i = 0;
-        'outer: while i < self.buf.len() {
-            for pat_idx in 0..self.patterns.len() {
-                let (pat, rep) = &self.patterns[pat_idx];
-                if self.buf[i..].starts_with(pat) {
-                    let rep = rep.clone();
-                    let pat_len = pat.len();
-                    self.buf.splice(i..i + pat_len, rep.iter().copied());
-                    i += rep.len();
-                    continue 'outer;
+    /// Emit every unambiguous byte from the buffered raw output.
+    ///
+    /// If the buffer ends while it is still a prefix of a pattern, keep it for
+    /// the next chunk. This includes a full shorter pattern that is also the
+    /// prefix of a longer one, preserving leftmost-longest matching regardless
+    /// of where reads split. Replacements are written directly to `out`, so
+    /// they are never considered input patterns.
+    fn drain_ready(&mut self, eof: bool) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut consumed = 0;
+
+        while consumed < self.buf.len() {
+            let remaining = &self.buf[consumed..];
+            let mut full_match: Option<(usize, &[u8])> = None;
+            let mut could_extend = false;
+
+            for (pattern, replacement) in &self.patterns {
+                if remaining.len() >= pattern.len() && remaining.starts_with(pattern) {
+                    if full_match.is_none() {
+                        full_match = Some((pattern.len(), replacement));
+                    }
+                } else if remaining.len() < pattern.len() && pattern.starts_with(remaining) {
+                    could_extend = true;
                 }
             }
-            i += 1;
+
+            if could_extend && !eof {
+                break;
+            }
+            if let Some((pattern_len, replacement)) = full_match {
+                out.extend_from_slice(replacement);
+                consumed += pattern_len;
+            } else {
+                out.push(remaining[0]);
+                consumed += 1;
+            }
         }
+
+        self.buf.drain(..consumed);
+        out
     }
 
     pub fn feed(&mut self, chunk: &[u8]) -> Vec<u8> {
         self.buf.extend_from_slice(chunk);
-        self.replace_in_buf();
-        if self.buf.len() <= self.holdback {
-            return Vec::new();
-        }
-        let emit_len = self.buf.len() - self.holdback;
-        let out: Vec<u8> = self.buf.drain(..emit_len).collect();
-        out
+        self.drain_ready(false)
     }
 
     pub fn flush(&mut self) -> Vec<u8> {
-        std::mem::take(&mut self.buf)
+        self.drain_ready(true)
     }
 }
 
@@ -135,6 +147,102 @@ mod tests {
             String::from_utf8(out).unwrap(),
             "key is [envault:openrouter] ok"
         );
+    }
+
+    #[test]
+    fn overlapping_prefixes_choose_longest_across_every_chunk_boundary() {
+        let short = "SYNTHETIC-PREFIX";
+        let long = "SYNTHETIC-PREFIX-TAIL-9988";
+        let expected = "before [envault:long] after";
+        let input = format!("before {long} after");
+
+        for split in 0..=input.len() {
+            let mut m = Masker::new(&[
+                ("short".to_string(), short.to_string()),
+                ("long".to_string(), long.to_string()),
+            ]);
+            let mut out = m.feed(&input.as_bytes()[..split]);
+            out.extend(m.feed(&input.as_bytes()[split..]));
+            out.extend(m.flush());
+            assert_eq!(String::from_utf8(out).unwrap(), expected, "split {split}");
+        }
+    }
+
+    #[test]
+    fn overlapping_prefixes_choose_longest_with_bytewise_feeds() {
+        let long = "SYNTHETIC-PREFIX-TAIL-9988";
+        let mut m = Masker::new(&[
+            ("short".to_string(), "SYNTHETIC-PREFIX".to_string()),
+            ("long".to_string(), long.to_string()),
+        ]);
+        let mut out = Vec::new();
+        for byte in long.as_bytes() {
+            out.extend(m.feed(&[*byte]));
+        }
+        out.extend(m.flush());
+        assert_eq!(String::from_utf8(out).unwrap(), "[envault:long]");
+    }
+
+    #[test]
+    fn overlapping_prefix_resolves_to_shorter_on_mismatch_or_eof() {
+        let secrets = [
+            ("short".to_string(), "SYNTHETIC-PREFIX".to_string()),
+            ("long".to_string(), "SYNTHETIC-PREFIX-TAIL-9988".to_string()),
+        ];
+        let mut mismatch = Masker::new(&secrets);
+        let mut out = mismatch.feed(b"SYNTHETIC-PREFIX?");
+        out.extend(mismatch.flush());
+        assert_eq!(String::from_utf8(out).unwrap(), "[envault:short]?");
+
+        let mut eof = Masker::new(&secrets);
+        let mut out = eof.feed(b"SYNTHETIC-PREFIX");
+        out.extend(eof.flush());
+        assert_eq!(String::from_utf8(out).unwrap(), "[envault:short]");
+    }
+
+    #[test]
+    fn masks_pty_newline_forms() {
+        for value in [
+            "SYNTHETIC-FIRST\nSYNTHETIC-LAST",
+            "SYNTHETIC-FIRST\r\nSYNTHETIC-LAST",
+            "SYNTHETIC-FIRST\n\nMIDDLE\r\nSYNTHETIC-LAST\n",
+        ] {
+            // ONLCR inserts CR before every LF, including one preceded by CR.
+            let translated = value.replace('\n', "\r\n");
+            for form in [value, translated.as_str()] {
+                let input = format!("before\r\n{form}|after\r\n");
+                let expected = "before\r\n[envault:multiline]|after\r\n";
+                for split in 0..=input.len() {
+                    let mut m = one("multiline", value);
+                    let mut out = m.feed(&input.as_bytes()[..split]);
+                    out.extend(m.feed(&input.as_bytes()[split..]));
+                    out.extend(m.flush());
+                    assert_eq!(out, expected.as_bytes(), "split {split}");
+                }
+                let mut m = one("multiline", value);
+                let mut out = Vec::new();
+                for byte in input.as_bytes() {
+                    out.extend(m.feed(&[*byte]));
+                }
+                out.extend(m.flush());
+                assert_eq!(out, expected.as_bytes());
+            }
+        }
+    }
+
+    #[test]
+    fn pty_newline_masking_preserves_unrelated_bytes() {
+        let mut m = one("multiline", "SYNTHETIC-FIRST\nSYNTHETIC-LAST");
+        let input = b"ordinary\ntext\r\nwith\r\r\nnewlines\r";
+        let mut out = m.feed(input);
+        out.extend(m.flush());
+        assert_eq!(out, input);
+    }
+
+    #[test]
+    fn pty_expansion_does_not_change_short_value_policy() {
+        let mut m = one("short", "a\nb\nc");
+        assert_eq!(mask_all(&mut m, b"a\r\nb\r\nc"), "a\r\nb\r\nc");
     }
 
     #[test]
@@ -187,5 +295,19 @@ mod tests {
         let mut out = m.feed(b"tail sk-or-v1");
         out.extend(m.flush());
         assert_eq!(String::from_utf8(out).unwrap(), "tail sk-or-v1");
+    }
+
+    #[test]
+    fn nonmatching_short_prompt_is_emitted_immediately() {
+        let mut m = one("long", "SYNTHETIC-SECRET-PROMPT-9988");
+        assert_eq!(m.feed(b"Password: "), b"Password: ");
+        assert!(m.flush().is_empty());
+    }
+
+    #[test]
+    fn prompt_only_holds_a_trailing_secret_prefix() {
+        let mut m = one("long", "SYNTHETIC-SECRET-PROMPT-9988");
+        assert_eq!(m.feed(b"Password: SYNTHETIC-SEC"), b"Password: ");
+        assert_eq!(m.flush(), b"SYNTHETIC-SEC");
     }
 }
