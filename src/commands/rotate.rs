@@ -14,8 +14,15 @@ pub struct RotateOutcome {
 /// Re-encrypt every secret to a brand-new keypair. Shared by the CLI command
 /// and the TUI's `:rotate`.
 pub fn rotate_in_place(home: &Path) -> Result<RotateOutcome> {
-    let mut vault = Vault::load(home)?;
     let old_identity = crate::access::unlock(home, "rotate", "re-key vault")?;
+    // Never hold the storage lock across the interactive authorization gate.
+    // Once acquired, reject an identity changed by a competing rotation.
+    let _generation = crate::store::lock_generation(home)?;
+    anyhow::ensure!(
+        crypto::recipient_from_identity()? == old_identity.to_public(),
+        "identity changed during authorization — retry rotation"
+    );
+    let mut vault = Vault::load(home)?;
 
     // Decrypt everything up front: any failure aborts before any state changes.
     let mut values: Vec<String> = Vec::with_capacity(vault.secrets.len());
