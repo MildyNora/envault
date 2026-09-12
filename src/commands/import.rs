@@ -29,7 +29,10 @@ pub fn cmd_import(file: PathBuf) -> Result<()> {
     for item in
         dotenvy::from_path_iter(&file).with_context(|| format!("reading {}", file.display()))?
     {
-        let (var, value) = item.context("parsing dotenv entry")?;
+        // dotenvy errors can contain the entire secret-bearing input line.
+        // Drop the source error: main prints the full anyhow error chain.
+        let (var, value) =
+            item.map_err(|_| anyhow::anyhow!("parsing dotenv entry failed (contents omitted)"))?;
         let alias = to_alias(&var);
         if !is_valid_alias(&alias) {
             eprintln!("skipping {var}: derived alias '{alias}' is invalid");

@@ -43,13 +43,28 @@ separate OS credential account. Moving the complete vault directory therefore
 keeps its identity association. The private key remains only in the credential
 store.
 
-On first access, envault migrates a matching canonical-path credential to the
-stable account and removes the obsolete path-based copy. A matching legacy
-shared credential is copied but retained temporarily because another unmigrated
-vault may still depend on it. `envault rotate` removes every stored copy that
-matches the retired identity, including that legacy slot; users with multiple
-legacy vaults sharing one identity should access each vault to migrate it before
-rotating any of them. A mismatching credential is never adopted or deleted.
+On first access, envault validates a legacy credential by decrypting the vault's
+entries under the generation lock, then copies it to the stable account. The
+public `recipient.txt` mirror never authorizes migration or overrides an existing
+stable credential. Empty legacy vaults cannot establish ownership from ciphertext;
+restore a nonempty backup before migration. A migrated path account is removed.
+A shared legacy slot is retained until rotation because unmigrated vaults may
+still need it. Access every legacy vault before rotating any of them.
+
+Rotation retires this vault's stable credential and matching current-path/shared
+aliases only. Malformed or unrelated obsolete entries are left alone. Other
+migrated vaults' stable accounts are neither enumerated nor deleted: they retain
+the old key, their access grants, and the ability to decrypt historical ciphertext
+encrypted with that key. Rotation is per-vault re-encryption, not global key-copy
+revocation. Backups and externally copied keys also remain outside its control.
+
+Before replacing the active credential, rotation verifies a recovery record in
+the protected credential backend containing both keys and hashes of the before
+and after vault bytes. Under the same generation lock, the next identity load
+repairs an interrupted activation according to the vault actually on disk. Unknown
+vault bytes fail closed and retain the record. Backend failure can block access
+until the backend is restored; do not delete its recovery entry. This handles
+process interruption, not arbitrary loss of the credential backend or disk.
 
 If identity metadata survives but `vault.json` does not, initialization fails
 closed instead of replacing the private key. Restore the vault file from backup

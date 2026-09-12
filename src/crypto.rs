@@ -58,6 +58,9 @@ fn credential_file(account: &str) -> Option<std::path::PathBuf> {
     #[cfg(debug_assertions)]
     {
         if let Some(path) = fixed_identity_file() {
+            if account.starts_with("rotation-recovery-") {
+                return Some(path.with_extension("rotation-recovery"));
+            }
             return Some(path);
         }
         std::env::var("ENVAULT_IDENTITY_DIR")
@@ -124,12 +127,14 @@ fn parse_identity(raw: &str) -> Result<age::x25519::Identity> {
 
 fn parse_matching_identity(raw: &str, home: &Path) -> Result<age::x25519::Identity> {
     let identity = parse_identity(raw)?;
-    let recipient = load_recipient(home)?;
-    if identity.to_public().to_string() != recipient.to_string() {
-        anyhow::bail!(
-            "no matching envault identity for {} — restore its original identity or backup",
-            home.display()
-        );
+    let vault = crate::store::Vault::load(home)?;
+    anyhow::ensure!(
+        !vault.secrets.is_empty(),
+        "legacy migration needs encrypted entries to establish ownership; restore a nonempty backup"
+    );
+    for entry in &vault.secrets {
+        decrypt_value(&identity, &entry.cipher)
+            .context("no matching envault identity for legacy migration")?;
     }
     Ok(identity)
 }
@@ -209,23 +214,29 @@ fn migrate_identity(
 }
 
 pub fn store_identity(identity: &age::x25519::Identity, home: &Path) -> Result<()> {
+    let _generation = crate::store::lock_generation(home)?;
+    store_identity_locked(identity, home)
+}
+
+pub(crate) fn store_identity_locked(identity: &age::x25519::Identity, home: &Path) -> Result<()> {
     let key = identity.to_string(); // SecretString
     let id = ensure_vault_id(home)?;
     set_credential(&stable_identity_account(&id), key.expose_secret())
 }
 
 pub fn load_identity(home: &Path) -> Result<age::x25519::Identity> {
+    let _generation = crate::store::lock_generation(home)?;
+    load_identity_locked(home)
+}
+
+/// Caller holds vault.lock. Read migration sources only after acquiring it;
+/// a waiter must observe a completed rotation instead of replaying an old key.
+pub(crate) fn load_identity_locked(home: &Path) -> Result<age::x25519::Identity> {
+    recover_rotation_locked(home)?;
     if let Some(id) = read_vault_id(home)? {
         let account = stable_identity_account(&id);
         if let Some(raw) = get_credential(&account)? {
-            let identity = parse_matching_identity(&raw, home)?;
-            // A failed cleanup during path-to-stable migration is retried on
-            // later access rather than leaving an obsolete credential forever.
-            if fixed_identity_file().is_none() {
-                let path_account = path_identity_account(home)?;
-                remove_if_matching(&path_account, &identity)?;
-            }
-            return Ok(identity);
+            return parse_identity(&raw);
         }
     }
 
@@ -239,7 +250,8 @@ pub fn load_identity(home: &Path) -> Result<age::x25519::Identity> {
 
     // Pre-scoping releases used one shared account. Copy a matching legacy key
     // to this vault's stable account, but retain the shared slot because another
-    // unmigrated vault may still need it. Rotation removes every matching copy.
+    // unmigrated vault may still need it. Rotation retires only this vault's
+    // account and its known path/shared aliases, never another vault's account.
     if let Some(raw) = get_credential(LEGACY_KEYCHAIN_ACCOUNT)? {
         return migrate_identity(home, &raw, None);
     }
@@ -252,7 +264,9 @@ pub fn load_identity(home: &Path) -> Result<age::x25519::Identity> {
 
 fn remove_if_matching(account: &str, expected: &age::x25519::Identity) -> Result<()> {
     if let Some(raw) = get_credential(account)? {
-        let parsed = parse_identity(&raw)?;
+        let Ok(parsed) = parse_identity(&raw) else {
+            return Ok(());
+        };
         if parsed.to_string().expose_secret() == expected.to_string().expose_secret() {
             remove_credential(account)?;
         }
@@ -264,15 +278,16 @@ pub fn delete_identity(home: &Path, expected: &age::x25519::Identity) -> Result<
     let id = read_vault_id(home)?.context("vault identity identifier is missing")?;
     let stable = stable_identity_account(&id);
     let raw = get_credential(&stable)?.context("vault identity credential is missing")?;
-    let stored = parse_matching_identity(&raw, home)?;
+    let stored = parse_identity(&raw)?;
     if stored.to_string().expose_secret() != expected.to_string().expose_secret() {
         anyhow::bail!("refusing to delete an unexpected vault identity");
     }
-    remove_credential(&stable)?;
-
     let path_account = path_identity_account(home)?;
-    remove_if_matching(&path_account, expected)?;
-    remove_if_matching(LEGACY_KEYCHAIN_ACCOUNT, expected)
+    if fixed_identity_file().is_none() {
+        remove_if_matching(&path_account, expected)?;
+        remove_if_matching(LEGACY_KEYCHAIN_ACCOUNT, expected)?;
+    }
+    remove_credential(&stable)
 }
 
 pub fn identity_recovery_present(home: &Path) -> Result<bool> {
@@ -285,6 +300,87 @@ pub fn identity_recovery_present(home: &Path) -> Result<bool> {
     Ok(get_credential(&path_identity_account(home)?)?.is_some())
 }
 
+// Stored only in the protected credential backend (or isolated debug backend).
+// The hashes bind both recoverable keys to the exact staged/current vaults.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct RotationRecovery {
+    before: String,
+    after: String,
+    old_key: String,
+    new_key: String,
+}
+
+fn recovery_account(home: &Path) -> Result<Option<String>> {
+    Ok(read_vault_id(home)?.map(|id| format!("rotation-recovery-{id}")))
+}
+
+fn vault_digest(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+pub(crate) fn prepare_rotation_locked(
+    home: &Path,
+    old: &age::x25519::Identity,
+    new: &age::x25519::Identity,
+    before: &[u8],
+    after: &[u8],
+) -> Result<()> {
+    let account = recovery_account(home)?.context("missing vault identity identifier")?;
+    anyhow::ensure!(
+        get_credential(&account)?.is_none(),
+        "pending identity recovery"
+    );
+    let record = RotationRecovery {
+        before: vault_digest(before),
+        after: vault_digest(after),
+        old_key: old.to_string().expose_secret().to_owned(),
+        new_key: new.to_string().expose_secret().to_owned(),
+    };
+    let raw = serde_json::to_string(&record)?;
+    set_credential(&account, &raw)?;
+    anyhow::ensure!(
+        get_credential(&account)?.is_some_and(|saved| saved.trim() == raw),
+        "rotation recovery record was not persisted"
+    );
+    Ok(())
+}
+
+/// Caller holds vault.lock. Interrupted rotation selects the credential for the
+/// vault actually on disk. Unknown bytes fail closed and retain both keys.
+pub(crate) fn recover_rotation_locked(home: &Path) -> Result<()> {
+    let Some(account) = recovery_account(home)? else {
+        return Ok(());
+    };
+    let Some(raw) = get_credential(&account)? else {
+        return Ok(());
+    };
+    let record: RotationRecovery = serde_json::from_str(&raw)
+        .map_err(|_| anyhow::anyhow!("invalid protected rotation recovery record"))?;
+    let current = vault_digest(&fs::read(crate::paths::vault_file(home))?);
+    let stable = stable_identity_account(&read_vault_id(home)?.context("missing vault id")?);
+    // An empty vault can have identical before/after bytes. Its active slot
+    // distinguishes completed replacement from interruption before replacement.
+    let activated_empty = record.before == record.after
+        && get_credential(&stable)?.is_some_and(|raw| raw.trim() == record.new_key);
+    let key = if current == record.after && activated_empty {
+        &record.new_key
+    } else if current == record.before {
+        &record.old_key
+    } else if current == record.after {
+        &record.new_key
+    } else {
+        anyhow::bail!("vault differs from rotation recovery record; preserve files for recovery");
+    };
+    let identity = parse_identity(key)?;
+    store_identity_locked(&identity, home)?;
+    let saved = get_credential(&stable)?.context("recovered credential missing")?;
+    anyhow::ensure!(
+        parse_identity(&saved)?.to_public() == identity.to_public(),
+        "credential recovery failed"
+    );
+    remove_credential(&account)
+}
+
 pub fn store_recipient(identity: &age::x25519::Identity, home: &Path) -> Result<()> {
     fs::create_dir_all(home)?;
     fs::write(
@@ -294,6 +390,8 @@ pub fn store_recipient(identity: &age::x25519::Identity, home: &Path) -> Result<
     Ok(())
 }
 
+// Production encryption must never trust this unauthenticated public mirror.
+#[cfg(test)]
 pub fn load_recipient(home: &Path) -> Result<age::x25519::Recipient> {
     let path = crate::paths::recipient_file(home);
     if !path.exists() {
@@ -352,6 +450,23 @@ mod tests {
         assert!(decrypt_value(&id, "aGVsbG8=").is_err()); // valid b64, not age data
     }
 
+    fn seed_vault(home: &Path, identity: &age::x25519::Identity) -> String {
+        let cipher = encrypt_value(&identity.to_public(), "synthetic-value").unwrap();
+        let vault = crate::store::Vault {
+            secrets: vec![crate::store::SecretEntry {
+                alias: "test".into(),
+                label: "Test".into(),
+                cipher: cipher.clone(),
+                url: None,
+                created_at: "test".into(),
+                updated_at: "test".into(),
+                notes: String::new(),
+            }],
+        };
+        vault.save(home).unwrap();
+        cipher
+    }
+
     #[test]
     fn identity_file_roundtrip() {
         let _guard = test_env_lock();
@@ -376,11 +491,12 @@ mod tests {
     }
 
     #[test]
-    fn identity_must_match_the_vault_recipient() {
+    fn migration_must_decrypt_the_vault_not_trust_the_mirror() {
         let home = tempfile::TempDir::new().unwrap();
         let identity = generate_identity();
         let other = generate_identity();
-        store_recipient(&identity, home.path()).unwrap();
+        seed_vault(home.path(), &identity);
+        store_recipient(&generate_identity(), home.path()).unwrap();
 
         let raw = identity.to_string();
         assert!(parse_matching_identity(raw.expose_secret(), home.path()).is_ok());
@@ -402,7 +518,8 @@ mod tests {
         std::env::set_var("ENVAULT_IDENTITY_DIR", credentials.path());
 
         let identity = generate_identity();
-        store_recipient(&identity, home.path()).unwrap();
+        seed_vault(home.path(), &identity);
+        store_recipient(&generate_identity(), home.path()).unwrap();
         let old_account = path_identity_account(home.path()).unwrap();
         let raw = identity.to_string();
         set_credential(&old_account, raw.expose_secret()).unwrap();
@@ -426,7 +543,8 @@ mod tests {
         std::env::set_var("ENVAULT_IDENTITY_DIR", credentials.path());
 
         let identity = generate_identity();
-        store_recipient(&identity, home.path()).unwrap();
+        seed_vault(home.path(), &identity);
+        store_recipient(&generate_identity(), home.path()).unwrap();
         let raw = identity.to_string();
         set_credential(LEGACY_KEYCHAIN_ACCOUNT, raw.expose_secret()).unwrap();
 
@@ -448,5 +566,226 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let err = load_recipient(dir.path()).unwrap_err().to_string();
         assert!(err.contains("envault init"), "got: {err}");
+    }
+    // All credential operations in these tests use a synthetic directory.
+    struct SyntheticCredentials(tempfile::TempDir);
+    impl SyntheticCredentials {
+        fn new() -> Self {
+            let dir = tempfile::TempDir::new().unwrap();
+            std::env::remove_var("ENVAULT_IDENTITY_FILE");
+            std::env::set_var("ENVAULT_IDENTITY_DIR", dir.path());
+            Self(dir)
+        }
+    }
+    impl Drop for SyntheticCredentials {
+        fn drop(&mut self) {
+            std::env::remove_var("ENVAULT_IDENTITY_DIR");
+        }
+    }
+
+    #[test]
+    fn malformed_obsolete_credential_does_not_destroy_rotation() {
+        let _env = test_env_lock();
+        let creds = SyntheticCredentials::new();
+        let home = tempfile::TempDir::new().unwrap();
+        let old = generate_identity();
+        store_identity(&old, home.path()).unwrap();
+        seed_vault(home.path(), &old);
+        fs::write(
+            creds.0.path().join(LEGACY_KEYCHAIN_ACCOUNT),
+            "unrelated malformed value",
+        )
+        .unwrap();
+        let outcome = crate::commands::rotate::rotate_in_place(home.path()).unwrap();
+        assert_ne!(outcome.recipient, old.to_public());
+        let active = load_identity(home.path()).unwrap();
+        let vault = crate::store::Vault::load(home.path()).unwrap();
+        assert_eq!(
+            decrypt_value(&active, &vault.secrets[0].cipher).unwrap(),
+            "synthetic-value"
+        );
+        assert_eq!(
+            fs::read_to_string(creds.0.path().join(LEGACY_KEYCHAIN_ACCOUNT)).unwrap(),
+            "unrelated malformed value"
+        );
+    }
+
+    #[test]
+    fn obsolete_cleanup_io_error_preserves_active_key_and_vault() {
+        let _env = test_env_lock();
+        let creds = SyntheticCredentials::new();
+        let home = tempfile::TempDir::new().unwrap();
+        let old = generate_identity();
+        store_identity(&old, home.path()).unwrap();
+        seed_vault(home.path(), &old);
+        let before = fs::read(crate::paths::vault_file(home.path())).unwrap();
+        fs::create_dir(creds.0.path().join(LEGACY_KEYCHAIN_ACCOUNT)).unwrap();
+        assert!(crate::commands::rotate::rotate_in_place(home.path()).is_err());
+        assert_eq!(
+            load_identity(home.path()).unwrap().to_public(),
+            old.to_public()
+        );
+        assert_eq!(
+            fs::read(crate::paths::vault_file(home.path())).unwrap(),
+            before
+        );
+    }
+
+    #[test]
+    fn interrupted_activation_recovers_the_key_for_current_ciphertext() {
+        let _env = test_env_lock();
+        let creds = SyntheticCredentials::new();
+        for activated in [false, true] {
+            let home = tempfile::TempDir::new().unwrap();
+            let old = generate_identity();
+            let new = generate_identity();
+            store_identity(&old, home.path()).unwrap();
+            seed_vault(home.path(), &old);
+            let before = fs::read(crate::paths::vault_file(home.path())).unwrap();
+            seed_vault(home.path(), &new);
+            let after = fs::read(crate::paths::vault_file(home.path())).unwrap();
+            fs::write(crate::paths::vault_file(home.path()), &before).unwrap();
+            {
+                let _lock = crate::store::lock_generation(home.path()).unwrap();
+                prepare_rotation_locked(home.path(), &old, &new, &before, &after).unwrap();
+                delete_identity(home.path(), &old).unwrap();
+                if activated {
+                    store_identity_locked(&new, home.path()).unwrap();
+                    fs::write(crate::paths::vault_file(home.path()), &after).unwrap();
+                } else {
+                    // Simulate a backend that cannot recreate the deleted slot.
+                    let stable =
+                        stable_identity_account(&read_vault_id(home.path()).unwrap().unwrap());
+                    fs::create_dir(creds.0.path().join(&stable)).unwrap();
+                    assert!(recover_rotation_locked(home.path()).is_err());
+                    assert!(
+                        get_credential(&recovery_account(home.path()).unwrap().unwrap())
+                            .unwrap()
+                            .is_some()
+                    );
+                    fs::remove_dir(creds.0.path().join(stable)).unwrap();
+                }
+            }
+            let active = load_identity(home.path()).unwrap();
+            assert_eq!(
+                active.to_public(),
+                if activated {
+                    new.to_public()
+                } else {
+                    old.to_public()
+                }
+            );
+            let vault = crate::store::Vault::load(home.path()).unwrap();
+            assert_eq!(
+                decrypt_value(&active, &vault.secrets[0].cipher).unwrap(),
+                "synthetic-value"
+            );
+            assert!(
+                get_credential(&recovery_account(home.path()).unwrap().unwrap())
+                    .unwrap()
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn recovery_rejects_unknown_vault_bytes_without_erasing_keys() {
+        let _env = test_env_lock();
+        let _creds = SyntheticCredentials::new();
+        let home = tempfile::TempDir::new().unwrap();
+        let old = generate_identity();
+        store_identity(&old, home.path()).unwrap();
+        let _lock = crate::store::lock_generation(home.path()).unwrap();
+        prepare_rotation_locked(home.path(), &old, &generate_identity(), b"before", b"after")
+            .unwrap();
+        fs::write(crate::paths::vault_file(home.path()), b"unrecognized").unwrap();
+        let account = recovery_account(home.path()).unwrap().unwrap();
+        let record = get_credential(&account).unwrap();
+        assert!(recover_rotation_locked(home.path()).is_err());
+        assert_eq!(get_credential(&account).unwrap(), record);
+        let stable = stable_identity_account(&read_vault_id(home.path()).unwrap().unwrap());
+        assert_eq!(
+            parse_identity(&get_credential(&stable).unwrap().unwrap())
+                .unwrap()
+                .to_public(),
+            old.to_public()
+        );
+    }
+
+    #[test]
+    fn empty_vault_rotation_activates_new_key() {
+        let _env = test_env_lock();
+        let _creds = SyntheticCredentials::new();
+        let home = tempfile::TempDir::new().unwrap();
+        let old = generate_identity();
+        store_identity(&old, home.path()).unwrap();
+        crate::store::Vault::default().save(home.path()).unwrap();
+        let result = crate::commands::rotate::rotate_in_place(home.path()).unwrap();
+        assert_ne!(result.recipient, old.to_public());
+        assert_eq!(
+            load_identity(home.path()).unwrap().to_public(),
+            result.recipient
+        );
+    }
+
+    #[test]
+    fn delayed_first_access_cannot_replay_legacy_key_after_rotation() {
+        let _env = test_env_lock();
+        let _creds = SyntheticCredentials::new();
+        let home = tempfile::TempDir::new().unwrap();
+        let old = generate_identity();
+        seed_vault(home.path(), &old);
+        set_credential(LEGACY_KEYCHAIN_ACCOUNT, old.to_string().expose_secret()).unwrap();
+        let lock = crate::store::lock_generation(home.path()).unwrap();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let waiter_home = home.path().to_owned();
+        let waiter = std::thread::spawn(move || {
+            let probe = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(waiter_home.join("vault.lock"))
+                .unwrap();
+            assert!(matches!(
+                probe.try_lock(),
+                Err(std::fs::TryLockError::WouldBlock)
+            ));
+            ready_tx.send(()).unwrap();
+            load_identity(&waiter_home).unwrap().to_public()
+        });
+        ready_rx.recv().unwrap();
+        // Another first access migrates and rotates while the waiter is blocked.
+        let authorized = load_identity_locked(home.path()).unwrap();
+        let result =
+            crate::commands::rotate::rotate_authorized_locked(home.path(), &authorized).unwrap();
+        drop(lock);
+        assert_eq!(waiter.join().unwrap(), result.recipient);
+        assert_eq!(
+            load_identity(home.path()).unwrap().to_public(),
+            result.recipient
+        );
+    }
+
+    #[test]
+    fn rotating_one_migrated_legacy_vault_retains_other_vault_and_history() {
+        let _env = test_env_lock();
+        let _creds = SyntheticCredentials::new();
+        let first = tempfile::TempDir::new().unwrap();
+        let second = tempfile::TempDir::new().unwrap();
+        let old = generate_identity();
+        let historical = seed_vault(first.path(), &old);
+        seed_vault(second.path(), &old);
+        set_credential(LEGACY_KEYCHAIN_ACCOUNT, old.to_string().expose_secret()).unwrap();
+        load_identity(first.path()).unwrap();
+        load_identity(second.path()).unwrap();
+        crate::commands::rotate::rotate_in_place(first.path()).unwrap();
+        let remaining = load_identity(second.path()).unwrap();
+        assert_eq!(remaining.to_public(), old.to_public());
+        assert_eq!(
+            decrypt_value(&remaining, &historical).unwrap(),
+            "synthetic-value"
+        );
+        let current = crate::store::Vault::load(first.path()).unwrap();
+        assert!(decrypt_value(&remaining, &current.secrets[0].cipher).is_err());
+        assert!(get_credential(LEGACY_KEYCHAIN_ACCOUNT).unwrap().is_none());
     }
 }
