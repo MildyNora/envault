@@ -36,6 +36,53 @@ For the full picture see the README's
 [security model](README.md#security-model--the-safety-boundary) and
 [`docs/how-it-works.md`](docs/how-it-works.md).
 
+## Identity migration and revocation
+
+Each vault carries a public, stable `identity-id` file and uses it to select a
+separate OS credential account. Moving the complete vault directory therefore
+keeps its identity association. The private key remains only in the credential
+store.
+
+On first access, envault validates a legacy credential by decrypting the vault's
+entries under the generation lock, then copies it to the stable account. The
+public `recipient.txt` mirror never authorizes migration or overrides an existing
+stable credential. For an existing empty legacy vault, run `envault init
+--empty-legacy` with the same `ENVAULT_HOME` setting, then `envault add <alias>`.
+This explicit operation creates a fresh, separate identity under the generation
+lock without reading, copying or deleting shared/path legacy credentials. It
+leaves the empty vault and public mirror unchanged; mirror contents are irrelevant.
+It refuses nonempty vaults or any existing `identity-id`, including pending
+recovery metadata. It does not recover historical backups: those retain their
+original legacy key association. Preserve their credentials. The credential is stored and verified
+before complete metadata is published atomically without replacing an existing
+path. On backend failure before publication, repair the backend and rerun the
+same command. Interrupted attempts may retain unreferenced fresh credentials;
+legacy credentials remain untouched. Existing identity/recovery metadata must
+never be deleted to force another initialization.
+A nonempty legacy vault still proves ownership before migration; its migrated path
+account is removed.
+A shared legacy slot is retained until rotation because unmigrated vaults may
+still need it. Access every legacy vault before rotating any of them.
+
+Rotation retires this vault's stable credential and matching current-path/shared
+aliases only. Malformed or unrelated obsolete entries are left alone. Other
+migrated vaults' stable accounts are neither enumerated nor deleted: they retain
+the old key, their access grants, and the ability to decrypt historical ciphertext
+encrypted with that key. Rotation is per-vault re-encryption, not global key-copy
+revocation. Backups and externally copied keys also remain outside its control.
+
+Before replacing the active credential, rotation verifies a recovery record in
+the protected credential backend containing both keys and hashes of the before
+and after vault bytes. Under the same generation lock, the next identity load
+repairs an interrupted activation according to the vault actually on disk. Unknown
+vault bytes fail closed and retain the record. Backend failure can block access
+until the backend is restored; do not delete its recovery entry. This handles
+process interruption, not arbitrary loss of the credential backend or disk.
+
+If identity metadata survives but `vault.json` does not, initialization fails
+closed instead of replacing the private key. Restore the vault file from backup
+before retrying.
+
 ## Supported versions
 
 envault is pre-1.0; only the latest release line receives security fixes.

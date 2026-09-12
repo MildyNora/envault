@@ -27,7 +27,7 @@ pub fn run_tui() -> Result<()> {
         let mut line = String::new();
         std::io::stdin().read_line(&mut line)?;
         if line.trim().eq_ignore_ascii_case("y") {
-            crate::commands::init::cmd_init(false)?;
+            crate::commands::init::cmd_init(false, false)?;
         } else {
             bail!("no vault — nothing to show");
         }
@@ -53,7 +53,10 @@ fn vault_mtime(home: &std::path::Path) -> Option<std::time::SystemTime> {
 /// excluding rotation's identity/vault swap.
 fn load_snapshot(home: &std::path::Path) -> Result<(Vault, age::x25519::Recipient)> {
     let _generation = crate::store::lock_generation(home)?;
-    Ok((Vault::load(home)?, crypto::recipient_from_identity()?))
+    Ok((
+        Vault::load(home)?,
+        crypto::load_identity_locked(home)?.to_public(),
+    ))
 }
 
 fn revision(vault: &Vault) -> Result<Vec<u8>> {
@@ -66,7 +69,7 @@ fn revision(vault: &Vault) -> Result<Vec<u8>> {
 fn save_dashboard(app: &App, home: &std::path::Path, expected: &[u8]) -> Result<()> {
     let _generation = crate::store::lock_generation(home)?;
     anyhow::ensure!(
-        crypto::recipient_from_identity()? == app.recipient
+        crypto::load_identity_locked(home)?.to_public() == app.recipient
             && revision(&Vault::load(home)?)? == expected,
         "vault or identity changed — reopen the entry and retry"
     );
@@ -325,7 +328,7 @@ mod tests {
             rotated_bytes
         );
         assert!(app.status.contains("save failed"));
-        let id = crypto::load_identity().unwrap();
+        let id = crypto::load_identity(home).unwrap();
         assert_eq!(
             crypto::decrypt_value(&id, &app.vault.get("new-key").unwrap().cipher).unwrap(),
             "synthetic-fresh-value"
@@ -365,12 +368,15 @@ mod tests {
         })
         .unwrap();
         assert_ne!(app.recipient, old_recipient);
-        assert_eq!(app.recipient, crypto::recipient_from_identity().unwrap());
+        assert_eq!(
+            app.recipient,
+            crypto::recipient_from_identity(home).unwrap()
+        );
         let before = revision(&app.vault).unwrap();
         open_add(&mut app);
         app.handle_key(key(KeyCode::Enter));
         save_dashboard(&app, home, &before).unwrap();
-        let id = crypto::load_identity().unwrap();
+        let id = crypto::load_identity(home).unwrap();
         let stored = Vault::load(home).unwrap();
         assert_eq!(
             crypto::decrypt_value(&id, &stored.get("new-key").unwrap().cipher).unwrap(),
@@ -403,7 +409,7 @@ mod tests {
         app.handle_key(key(KeyCode::Char('e')));
         // Empty value = metadata-only edit; it must not restore old ciphertext.
         app.handle_key(key(KeyCode::Enter));
-        let id = crypto::load_identity().unwrap();
+        let id = crypto::load_identity(home).unwrap();
         let mut current = Vault::load(home).unwrap();
         current.secrets[0].cipher =
             crypto::encrypt_value(&id.to_public(), "external-edit").unwrap();

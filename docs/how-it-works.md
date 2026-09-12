@@ -34,7 +34,8 @@ while *structurally* denying it the plaintext.
   (Unix).
 - **Identity** — the age X25519 private key. Stored only in the **OS keychain**
   (macOS Keychain, Windows Credential Manager, Linux Secret Service; service
-  `envault`). Never written to disk in the clear.
+  `envault`, with a separate account per stable vault identifier). Never written
+  to disk in the clear.
 - **Recipient** — the public key, mirrored to `recipient.txt`, but treated as
   advisory only (see §4).
 
@@ -89,8 +90,8 @@ Four commands touch plaintext. Each one confines it:
   value (agent never sees it) or declines with a note. The agent receives only an
   exit code: `0` granted · `3` declined · `4` cancelled · `5` timeout · `6`
   no-window.
-- **`envault rotate`** — re-keys the whole vault to a fresh keypair and revokes
-  every prior keychain "Always Allow" grant. Requires an interactive TTY in
+- **`envault rotate`** — re-keys the current vault to a fresh keypair and replaces
+  its credential item. Other migrated vaults retain their keys and access grants. Requires an interactive TTY in
   release builds, so an agent's non-interactive shell can't trigger a destructive
   re-key. (M3)
 
@@ -181,8 +182,9 @@ plaintext-never-seen guarantee lives in the binary, so it holds on every harness
 
 ## 10. Known gaps / deferred (internal)
 
-- **M2** — rotation is not fully crash-safe: a crash mid-re-key leaves a small
-  window that needs a multi-recipient / two-slot bridge to close. (deferred)
+- **Rotation recovery** — protected before/after key records recover interrupted
+  activation under the generation lock. Native backend failure and power-loss
+  durability remain hardware-untested; see SECURITY.md for the per-vault policy.
 - **Guard path-canonicalization** — the hook's path match is best-effort; the
   real enforcement is the in-binary checks.
 - **L3 / L4** — session-directory randomness; non-Unix file ACLs.

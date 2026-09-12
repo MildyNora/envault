@@ -16,3 +16,7 @@ pub fn vault_file(home: &Path) -> PathBuf {
 pub fn recipient_file(home: &Path) -> PathBuf {
     home.join("recipient.txt")
 }
+
+pub fn identity_id_file(home: &Path) -> PathBuf {
+    home.join("identity-id")
+}

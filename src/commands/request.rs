@@ -165,7 +165,7 @@ fn finish(
 ) -> Result<i32> {
     let (result, code) = match outcome {
         Outcome::Granted(value) => {
-            let recipient = crypto::recipient_from_identity()?;
+            let recipient = crypto::recipient_from_identity(home)?;
             let cipher = crypto::encrypt_value(&recipient, &value)?;
             let mut vault = Vault::load(home)?;
             if vault.get(&meta.name).is_none() {
@@ -249,7 +249,11 @@ fn spawn_window(exe: &Path, session: &Path) -> Result<()> {
     // Carry the caller's vault selection into the fresh login shell that
     // `do script` spawns, so the window writes to the same vault we checked.
     let mut env_prefix = String::new();
-    for key in ["ENVAULT_HOME", "ENVAULT_IDENTITY_FILE"] {
+    for key in [
+        "ENVAULT_HOME",
+        "ENVAULT_IDENTITY_FILE",
+        "ENVAULT_IDENTITY_DIR",
+    ] {
         if let Ok(val) = std::env::var(key) {
             env_prefix.push_str(&format!("{key}={} ", shell_quote(&val)));
         }

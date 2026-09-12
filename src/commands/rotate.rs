@@ -18,17 +18,26 @@ pub fn rotate_in_place(home: &Path) -> Result<RotateOutcome> {
     // Never hold the storage lock across the interactive authorization gate.
     // Once acquired, reject an identity changed by a competing rotation.
     let _generation = crate::store::lock_generation(home)?;
+    rotate_authorized_locked(home, &old_identity)
+}
+
+/// Caller holds the generation lock after authorization.
+pub(crate) fn rotate_authorized_locked(
+    home: &Path,
+    old_identity: &age::x25519::Identity,
+) -> Result<RotateOutcome> {
     anyhow::ensure!(
-        crypto::recipient_from_identity()? == old_identity.to_public(),
+        crypto::load_identity_locked(home)?.to_public() == old_identity.to_public(),
         "identity changed during authorization — retry rotation"
     );
-    let mut vault = Vault::load(home)?;
+    let before = fs::read(paths::vault_file(home))?;
+    let mut vault: Vault = serde_json::from_slice(&before)?;
 
     // Decrypt everything up front: any failure aborts before any state changes.
     let mut values: Vec<String> = Vec::with_capacity(vault.secrets.len());
     for entry in &vault.secrets {
         values.push(
-            crypto::decrypt_value(&old_identity, &entry.cipher)
+            crypto::decrypt_value(old_identity, &entry.cipher)
                 .with_context(|| format!("decrypting '{}' with the current key", entry.alias))?,
         );
     }
@@ -40,16 +49,25 @@ pub fn rotate_in_place(home: &Path) -> Result<RotateOutcome> {
     }
 
     // Stage the re-encrypted vault first: if the identity swap below fails,
-    // nothing has changed; the lockout window is just the rename.
+    // keep both keys in protected recovery storage until activation is verified.
     let staged = home.join("vault.json.new");
-    fs::write(&staged, serde_json::to_string_pretty(&vault)?)?;
+    let after = serde_json::to_vec_pretty(&vault)?;
+    fs::write(&staged, &after)?;
     crate::platform::set_mode(&staged, 0o600)?;
 
     // Delete-then-create gives the new Keychain item a fresh ACL, so macOS
-    // asks for authorization again: rotation revokes every prior grant.
-    crypto::delete_identity()?;
-    crypto::store_identity(&new_identity, home)?;
-    fs::rename(&staged, paths::vault_file(home)).context("activating the rotated vault")?;
+    // asks for authorization again: this vault gets a new credential item.
+    crypto::prepare_rotation_locked(home, old_identity, &new_identity, &before, &after)?;
+    let activation = (|| -> Result<()> {
+        crypto::delete_identity(home, old_identity)?;
+        crypto::store_identity_locked(&new_identity, home)?;
+        fs::rename(&staged, paths::vault_file(home)).context("activating the rotated vault")?;
+        Ok(())
+    })();
+    // Keep the protected recovery record if backend recovery itself fails.
+    // A later load retries it before returning an identity.
+    crypto::recover_rotation_locked(home).context("recovering/finishing identity rotation")?;
+    activation?;
     crypto::store_recipient(&new_identity, home)?;
 
     Ok(RotateOutcome {
@@ -74,7 +92,7 @@ pub fn cmd_rotate() -> Result<()> {
     println!("  new public key: {}", outcome.recipient);
     println!(
         "\nmacOS will ask for Keychain authorization again on next use — intentional:\n\
-         rotation revokes every previously granted 'Always Allow'."
+         this vault receives a fresh credential item; other vaults retain their grants."
     );
     Ok(())
 }

@@ -14,7 +14,7 @@ pub fn cmd_audit(json: bool) -> Result<()> {
 
     // Loading the identity both proves human presence again and gives the HMAC
     // key needed to verify the chain.
-    let identity = crypto::load_identity()?;
+    let identity = crypto::load_identity(&home)?;
     let secret = identity.to_string();
     let key = secret.expose_secret().as_bytes();
 
