@@ -157,11 +157,11 @@ impl App {
         self.mode = Mode::Reveal(value);
     }
 
-    /// Swap in a vault reloaded from disk (e.g. after an external change like a
-    /// granted request), keeping the selection in range. The recipient is
-    /// unchanged — external writers encrypt to the same public key.
-    pub fn reload_vault(&mut self, vault: Vault) {
+    /// Swap in a vault and recipient reloaded after an external change, keeping
+    /// the selection in range.
+    pub fn reload_vault(&mut self, vault: Vault, recipient: age::x25519::Recipient) {
         self.vault = vault;
+        self.recipient = recipient;
         self.clamp_selection();
     }
 
@@ -596,10 +596,58 @@ mod tests {
         app.selected = 3; // on the add row
         let mut v = Vault::default();
         v.insert(entry("only", &id.to_public())).unwrap();
-        app.reload_vault(v);
+        app.reload_vault(v, id.to_public());
         assert_eq!(app.vault.secrets.len(), 1);
         assert_eq!(app.selected, 1, "selection clamped to the new add row");
         assert_eq!(app.selected_alias(), None); // add row
+    }
+
+    #[test]
+    fn reload_vault_uses_rotated_recipient_for_new_values() {
+        let (mut app, old_id) = app_with(&[]);
+        let new_id = generate_identity();
+        app.reload_vault(Vault::default(), new_id.to_public());
+
+        app.handle_key(ch('a'));
+        type_str(&mut app, "new-key");
+        app.handle_key(key(KeyCode::Tab));
+        type_str(&mut app, "fresh-after-rotation-9988");
+        assert!(matches!(
+            app.handle_key(key(KeyCode::Enter)),
+            Some(Effect::Save)
+        ));
+
+        let cipher = &app.vault.get("new-key").unwrap().cipher;
+        assert_eq!(
+            decrypt_value(&new_id, cipher).unwrap(),
+            "fresh-after-rotation-9988"
+        );
+        assert!(decrypt_value(&old_id, cipher).is_err());
+    }
+
+    #[test]
+    fn reload_vault_uses_rotated_recipient_for_edited_values() {
+        let (mut app, old_id) = app_with(&["existing"]);
+        let new_id = generate_identity();
+        let mut rotated = Vault::default();
+        rotated
+            .insert(entry("existing", &new_id.to_public()))
+            .unwrap();
+        app.reload_vault(rotated, new_id.to_public());
+
+        app.handle_key(ch('e'));
+        type_str(&mut app, "edited-after-rotation-7766");
+        assert!(matches!(
+            app.handle_key(key(KeyCode::Enter)),
+            Some(Effect::Save)
+        ));
+
+        let cipher = &app.vault.get("existing").unwrap().cipher;
+        assert_eq!(
+            decrypt_value(&new_id, cipher).unwrap(),
+            "edited-after-rotation-7766"
+        );
+        assert!(decrypt_value(&old_id, cipher).is_err());
     }
 
     #[test]

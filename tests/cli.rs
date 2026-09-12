@@ -58,6 +58,98 @@ impl Default for TestEnv {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn dashboard_startup_ignores_replaced_public_recipient() {
+    use base64::Engine;
+    use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+    use std::io::{Read, Write};
+    use std::str::FromStr;
+    use std::time::{Duration, Instant};
+
+    let attacker = age::x25519::Identity::generate();
+    for mirror in [
+        attacker.to_public().to_string(),
+        "malformed public mirror".into(),
+    ] {
+        let te = TestEnv::new();
+        te.init();
+        std::fs::write(te.home.path().join("recipient.txt"), mirror).unwrap();
+        let pair = native_pty_system()
+            .openpty(PtySize {
+                rows: 30,
+                cols: 100,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
+        let mut cmd = CommandBuilder::new(assert_cmd::cargo::cargo_bin("envault"));
+        cmd.env("ENVAULT_HOME", te.home.path());
+        cmd.env("ENVAULT_IDENTITY_FILE", te.identity_file());
+        cmd.env("TERM", "xterm-256color");
+        cmd.cwd(te.project.path());
+        let mut child = pair.slave.spawn_command(cmd).unwrap();
+        drop(pair.slave);
+        let mut reader = pair.master.try_clone_reader().unwrap();
+        let mut writer = pair.master.take_writer().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let reader_thread = std::thread::spawn(move || {
+            let mut buf = [0; 4096];
+            while let Ok(n) = reader.read(&mut buf) {
+                if n == 0 || tx.send(buf[..n].to_vec()).is_err() {
+                    break;
+                }
+            }
+        });
+        let wait_for = |needle: &[u8]| -> bool {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let mut output = Vec::new();
+            while Instant::now() < deadline {
+                match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                    Ok(bytes) => output.extend(bytes),
+                    Err(_) => return false,
+                }
+                if output.windows(needle.len()).any(|s| s == needle) {
+                    return true;
+                }
+            }
+            false
+        };
+        let ready = wait_for(b"envault");
+        if ready {
+            writer
+                .write_all(b"adashboard-key\tsynthetic-dashboard-value\r")
+                .unwrap();
+        }
+        let saved = ready && wait_for(b"added");
+        // Always terminate the isolated dashboard, including on a failed assertion.
+        child.kill().ok();
+        child.wait().ok();
+        drop(writer);
+        drop(pair.master);
+        reader_thread.join().unwrap();
+        assert!(ready && saved, "dashboard did not reach the save outcome");
+        let vault: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(te.home.path().join("vault.json")).unwrap())
+                .unwrap();
+        let cipher = base64::engine::general_purpose::STANDARD
+            .decode(vault["secrets"][0]["cipher"].as_str().unwrap())
+            .unwrap();
+        let identity = age::x25519::Identity::from_str(
+            std::fs::read_to_string(te.identity_file()).unwrap().trim(),
+        )
+        .unwrap();
+        assert!(
+            age::decrypt(&attacker, &cipher).is_err(),
+            "public recipient file redirected encryption"
+        );
+        assert_eq!(
+            age::decrypt(&identity, &cipher).unwrap(),
+            b"synthetic-dashboard-value"
+        );
+    }
+}
+
 #[test]
 fn init_creates_vault_recipient_and_identity() {
     let te = TestEnv::new();

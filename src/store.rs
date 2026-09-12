@@ -5,6 +5,23 @@ use std::path::Path;
 
 use crate::paths::vault_file;
 
+/// Serialize dashboard snapshots/saves with identity rotation. Keep the lock
+/// file in place: removing it would let waiters lock different inodes.
+/// Other mutation paths are handled by the separate storage-transaction work.
+pub(crate) fn lock_generation(home: &Path) -> Result<fs::File> {
+    let path = home.join("vault.lock");
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&path)
+        .context("opening vault generation lock")?;
+    crate::platform::set_mode(&path, 0o600)?;
+    file.lock().context("locking vault generation")?;
+    Ok(file)
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SecretEntry {
     pub alias: String,
@@ -99,6 +116,23 @@ mod tests {
         let loaded = Vault::load(home.path()).unwrap();
         assert_eq!(loaded.secrets.len(), 1);
         assert_eq!(loaded.get("openrouter").unwrap().label, "openrouter label");
+    }
+
+    #[test]
+    fn generation_lock_excludes_other_handles_and_releases_on_drop() {
+        let home = TempDir::new().unwrap();
+        let guard = lock_generation(home.path()).unwrap();
+        let second = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(home.path().join("vault.lock"))
+            .unwrap();
+        assert!(matches!(
+            second.try_lock(),
+            Err(fs::TryLockError::WouldBlock)
+        ));
+        drop(guard);
+        second.try_lock().unwrap();
     }
 
     #[test]

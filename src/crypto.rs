@@ -99,6 +99,8 @@ pub fn store_recipient(identity: &age::x25519::Identity, home: &Path) -> Result<
     Ok(())
 }
 
+// Production encryption must never trust this unauthenticated public mirror.
+#[cfg(test)]
 pub fn load_recipient(home: &Path) -> Result<age::x25519::Recipient> {
     let path = crate::paths::recipient_file(home);
     if !path.exists() {
