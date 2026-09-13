@@ -7,6 +7,13 @@ use std::path::Path;
 
 use crate::paths::vault_file;
 
+/// One permanent inode serializes storage transactions and identity generation.
+pub(crate) fn lock_generation(home: &Path) -> Result<File> {
+    let lock = open_lock(home)?;
+    lock.lock().context("locking vault generation")?;
+    Ok(lock)
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct SecretEntry {
     pub alias: String,
@@ -27,6 +34,20 @@ pub struct Vault {
 
 impl Vault {
     pub fn load(home: &Path) -> Result<Vault> {
+        if !home.exists() {
+            bail!(
+                "no vault found at {} — run `envault init` first",
+                vault_file(home).display()
+            );
+        }
+        let _generation = lock_generation(home)?;
+        crate::crypto::recover_rotation_locked(home)?;
+        Self::load_locked(home)
+    }
+
+    /// Caller holds vault.lock and has completed any pending recovery. This
+    /// primitive also supports legacy identity validation without reacquiring.
+    pub(crate) fn load_locked(home: &Path) -> Result<Vault> {
         let path = vault_file(home);
         if !path.exists() {
             bail!(
@@ -34,14 +55,6 @@ impl Vault {
                 path.display()
             );
         }
-        let lock = open_lock(home)?;
-        lock.lock_shared()
-            .with_context(|| format!("locking {} for reading", path.display()))?;
-        Self::load_unlocked(home)
-    }
-
-    fn load_unlocked(home: &Path) -> Result<Vault> {
-        let path = vault_file(home);
         let raw =
             fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
         serde_json::from_str(&raw).with_context(|| format!("parsing {}", path.display()))
@@ -49,65 +62,47 @@ impl Vault {
 
     pub fn save(&self, home: &Path) -> Result<()> {
         fs::create_dir_all(home)?;
-        let lock = open_lock(home)?;
-        lock.lock()
-            .with_context(|| format!("locking {} for writing", vault_file(home).display()))?;
-        self.save_unlocked(home)
+        let _generation = lock_generation(home)?;
+        crate::crypto::recover_rotation_locked(home)?;
+        self.save_locked(home)
     }
 
-    /// Reload, mutate, and atomically persist the vault while holding one
-    /// inter-process lock. The returned vault is the exact committed state.
     #[cfg(test)]
     pub fn transaction<T>(
         home: &Path,
         mutate: impl FnOnce(&mut Vault) -> Result<T>,
     ) -> Result<(T, Vault)> {
-        Self::with_exclusive(home, |mut vault| {
-            let result = mutate(&mut vault)?;
-            vault.save_unlocked(home)?;
-            Ok((result, vault))
-        })
+        let _generation = lock_generation(home)?;
+        crate::crypto::recover_rotation_locked(home)?;
+        let mut vault = Self::load_locked(home)?;
+        let result = mutate(&mut vault)?;
+        vault.save_locked(home)?;
+        Ok((result, vault))
     }
 
-    /// Commit an encryption-related mutation only if the identity authenticated
-    /// before taking the storage lock is still authoritative after acquisition.
-    /// This keeps any Keychain/biometric interaction outside the critical
-    /// section while preventing a queued writer from using a retired key.
+    /// Explicit authorization and user input precede this transaction. Native
+    /// credential revalidation may itself prompt; do not promise otherwise.
     pub fn transaction_for_recipient<T>(
         home: &Path,
         expected_recipient: &age::x25519::Recipient,
         mutate: impl FnOnce(&mut Vault, &age::x25519::Recipient) -> Result<T>,
     ) -> Result<(T, Vault)> {
         wait_at_test_transaction_barrier()?;
-        Self::with_exclusive(home, |mut vault| {
-            let current_recipient = crate::crypto::recipient_from_identity()?;
-            anyhow::ensure!(
-                current_recipient == *expected_recipient,
-                "vault identity changed while waiting for the storage lock — retry"
-            );
-            let result = mutate(&mut vault, &current_recipient)?;
-            vault.save_unlocked(home)?;
-            Ok((result, vault))
-        })
+        let _generation = lock_generation(home)?;
+        // Recovery can replace the active identity. Finish it BEFORE loading
+        // persisted bytes or performing even a metadata-only edit/deletion.
+        let current_recipient = crate::crypto::load_identity_locked(home)?.to_public();
+        anyhow::ensure!(
+            current_recipient == *expected_recipient,
+            "vault identity changed while waiting for the storage lock — retry"
+        );
+        let mut vault = Self::load_locked(home)?;
+        let result = mutate(&mut vault, &current_recipient)?;
+        vault.save_locked(home)?;
+        Ok((result, vault))
     }
 
-    /// Hold the same exclusive lock used by transactions for a specialized
-    /// whole-vault operation such as key rotation.
-    pub fn with_exclusive<T>(home: &Path, operation: impl FnOnce(Vault) -> Result<T>) -> Result<T> {
-        let path = vault_file(home);
-        if !path.exists() {
-            bail!(
-                "no vault found at {} — run `envault init` first",
-                path.display()
-            );
-        }
-        let lock = open_lock(home)?;
-        lock.lock()
-            .with_context(|| format!("locking {} for writing", path.display()))?;
-        operation(Self::load_unlocked(home)?)
-    }
-
-    fn save_unlocked(&self, home: &Path) -> Result<()> {
+    pub(crate) fn save_locked(&self, home: &Path) -> Result<()> {
         let path = vault_file(home);
         let staged = home.join("vault.json.tmp");
         let mut file = OpenOptions::new()
@@ -262,6 +257,23 @@ mod tests {
             .unwrap()
             .get("not-committed")
             .is_none());
+    }
+
+    #[test]
+    fn generation_lock_excludes_other_handles_and_releases_on_drop() {
+        let home = TempDir::new().unwrap();
+        let guard = lock_generation(home.path()).unwrap();
+        let second = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(home.path().join("vault.lock"))
+            .unwrap();
+        assert!(matches!(
+            second.try_lock(),
+            Err(fs::TryLockError::WouldBlock)
+        ));
+        drop(guard);
+        second.try_lock().unwrap();
     }
 
     #[test]

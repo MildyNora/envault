@@ -16,9 +16,9 @@ pub fn cmd_add(
         bail!("alias '{alias}' is invalid — use kebab-case: lowercase letters, digits, '-'");
     }
     let home = paths::envault_home();
-    // Resolve any Keychain authorization before entering the storage lock.
+    // Preload the identity before the write transaction; its locked recheck may prompt.
     // The transaction validates that this identity is still current.
-    let expected_recipient = crypto::recipient_from_identity()?;
+    let expected_recipient = crypto::recipient_from_identity(&home)?;
     if Vault::load(&home)?.get(&alias).is_some() {
         bail!("alias '{alias}' already exists");
     }

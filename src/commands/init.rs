@@ -5,8 +5,16 @@ use crate::crypto;
 use crate::paths;
 use crate::store::Vault;
 
-pub fn cmd_init(if_needed: bool) -> Result<()> {
+pub fn cmd_init(if_needed: bool, empty_legacy: bool) -> Result<()> {
     let home = paths::envault_home();
+    if empty_legacy {
+        crypto::initialize_empty_legacy(&home)?;
+        println!(
+            "Initialized a fresh identity for the empty legacy vault; legacy credentials preserved"
+        );
+        println!("Next: add a secret with `envault add <alias>`");
+        return Ok(());
+    }
     if paths::vault_file(&home).exists() {
         if if_needed {
             // Installers call `init --if-needed`: a pre-existing vault is fine.
@@ -19,6 +27,13 @@ pub fn cmd_init(if_needed: bool) -> Result<()> {
     }
     fs::create_dir_all(&home)?;
     crate::platform::set_mode(&home, 0o700)?;
+    if crypto::identity_recovery_present(&home)? {
+        bail!(
+            "vault recovery required at {}: identity metadata exists but vault.json is missing; \
+             refusing to replace the private key. Restore vault.json from backup before retrying",
+            home.display()
+        );
+    }
 
     let identity = crypto::generate_identity();
     crypto::store_identity(&identity, &home)?;

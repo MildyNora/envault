@@ -12,8 +12,8 @@ fn to_alias(var: &str) -> String {
 
 pub fn cmd_import(file: PathBuf) -> Result<()> {
     let home = paths::envault_home();
-    // Resolve any Keychain authorization before entering the storage lock.
-    let expected_recipient = crypto::recipient_from_identity()?;
+    // Preload the identity before the write transaction; its locked recheck may prompt.
+    let expected_recipient = crypto::recipient_from_identity(&home)?;
 
     let cwd = std::env::current_dir()?;
     let mut manifest = match find_manifest(&cwd) {
@@ -24,14 +24,19 @@ pub fn cmd_import(file: PathBuf) -> Result<()> {
         },
     };
 
+    // Gather and sanitize all file input before taking the write lock.
+    let entries: Vec<(String, String)> = dotenvy::from_path_iter(&file)
+        .with_context(|| format!("reading {}", file.display()))?
+        .map(|item| {
+            item.map_err(|_| anyhow::anyhow!("parsing dotenv entry failed (contents omitted)"))
+        })
+        .collect::<Result<_>>()?;
+
     let ((imported, skipped), _) =
         Vault::transaction_for_recipient(&home, &expected_recipient, |vault, recipient| {
             let mut imported = 0usize;
             let mut skipped = 0usize;
-            for item in dotenvy::from_path_iter(&file)
-                .with_context(|| format!("reading {}", file.display()))?
-            {
-                let (var, value) = item.context("parsing dotenv entry")?;
+            for (var, value) in entries {
                 let alias = to_alias(&var);
                 if !is_valid_alias(&alias) {
                     eprintln!("skipping {var}: derived alias '{alias}' is invalid");

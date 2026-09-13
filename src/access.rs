@@ -16,7 +16,7 @@ pub fn unlock(home: &Path, action: &str, detail: &str) -> Result<age::x25519::Id
     if s.touch_id {
         biometric::require(&format!("Approve envault {action}: {detail}"))?;
     }
-    let identity = crypto::load_identity()?;
+    let identity = crypto::load_identity(home)?;
     if s.audit_log {
         // Key the log with the Keychain-protected identity so it can't be
         // forged, and FAIL CLOSED: if we can't record the access, don't grant

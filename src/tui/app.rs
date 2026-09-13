@@ -53,6 +53,7 @@ pub struct Form {
     pub fields: [String; 5],
     pub focus: usize,
     pub editing_alias: Option<String>,
+    pub expected: Option<SecretEntry>,
 }
 
 #[derive(Debug)]
@@ -61,7 +62,7 @@ pub enum Mode {
     Search,
     Add(Form),
     Edit(Form),
-    ConfirmDelete,
+    ConfirmDelete(SecretEntry),
     ConfirmRotate,
     Reveal(String),
     Command(CommandLine),
@@ -168,11 +169,11 @@ impl App {
         self.mode = Mode::Reveal(value);
     }
 
-    /// Swap in a vault reloaded from disk (e.g. after an external change like a
-    /// granted request), keeping the selection in range. The recipient is
-    /// unchanged — external writers encrypt to the same public key.
-    pub fn reload_vault(&mut self, vault: Vault) {
+    /// Swap in a vault and recipient reloaded after an external change, keeping
+    /// the selection in range.
+    pub fn reload_vault(&mut self, vault: Vault, recipient: age::x25519::Recipient) {
         self.vault = vault;
+        self.recipient = recipient;
         self.clamp_selection();
     }
 
@@ -195,7 +196,7 @@ impl App {
             }
             Mode::Reveal(_) => None, // any key returns to List
             Mode::Help => None,      // any key returns to List
-            Mode::ConfirmDelete => self.on_confirm_delete(key),
+            Mode::ConfirmDelete(expected) => self.on_confirm_delete(key, expected),
             Mode::ConfirmRotate => self.on_confirm_rotate(key),
             Mode::Command(input) => self.on_command_key(key, input),
             Mode::Add(form) => self.on_form_key(key, form, false),
@@ -218,6 +219,7 @@ impl App {
             fields: Default::default(),
             focus: NAME,
             editing_alias: None,
+            expected: None,
         });
     }
 
@@ -233,6 +235,7 @@ impl App {
             ],
             focus: VALUE, // name is locked; start on value
             editing_alias: Some(alias.to_string()),
+            expected: Some(e.clone()),
         });
     }
 
@@ -271,8 +274,10 @@ impl App {
                 }
             }
             KeyCode::Char('d') => {
-                if self.selected_alias().is_some() {
-                    self.mode = Mode::ConfirmDelete;
+                if let Some(alias) = self.selected_alias() {
+                    self.mode = Mode::ConfirmDelete(
+                        self.vault.get(&alias).expect("selected exists").clone(),
+                    );
                 }
             }
             KeyCode::Char('r') => {
@@ -320,16 +325,13 @@ impl App {
         }
     }
 
-    fn on_confirm_delete(&mut self, key: KeyEvent) -> Option<Effect> {
+    fn on_confirm_delete(&mut self, key: KeyEvent, expected: SecretEntry) -> Option<Effect> {
         self.mode = Mode::List;
         if let KeyCode::Char('y') = key.code {
-            if let Some(alias) = self.selected_alias() {
-                let expected = self.vault.get(&alias).expect("selected exists").clone();
-                self.vault.secrets.retain(|s| s.alias != alias);
-                self.clamp_selection();
-                self.set_success(format!("deleted '{alias}'"));
-                return Some(Effect::Save(Box::new(VaultChange::Delete(expected))));
-            }
+            self.vault.secrets.retain(|s| s.alias != expected.alias);
+            self.clamp_selection();
+            self.set_success(format!("deleted '{}'", expected.alias));
+            return Some(Effect::Save(Box::new(VaultChange::Delete(expected))));
         }
         None
     }
@@ -476,13 +478,7 @@ impl App {
                 }
             };
             let replace_cipher = cipher.is_some();
-            let expected = match self.vault.secrets.iter().find(|s| s.alias == target) {
-                Some(entry) => entry.clone(),
-                None => {
-                    self.set_error(format!("name '{target}' no longer exists"));
-                    return None;
-                }
-            };
+            let expected = form.expected.clone().expect("edit captured original entry");
             let mut updated = expected.clone();
             updated.label = if label.is_empty() {
                 target.clone()
@@ -495,12 +491,14 @@ impl App {
                 updated.cipher = c;
             }
             updated.updated_at = now_rfc3339();
-            *self
+            if let Some(entry) = self
                 .vault
                 .secrets
                 .iter_mut()
                 .find(|entry| entry.alias == target)
-                .expect("entry was just found") = updated.clone();
+            {
+                *entry = updated.clone();
+            }
             self.set_success(format!("updated '{target}'"));
             self.mode = Mode::List;
             return Some(Effect::Save(Box::new(VaultChange::Update {
@@ -624,10 +622,58 @@ mod tests {
         app.selected = 3; // on the add row
         let mut v = Vault::default();
         v.insert(entry("only", &id.to_public())).unwrap();
-        app.reload_vault(v);
+        app.reload_vault(v, id.to_public());
         assert_eq!(app.vault.secrets.len(), 1);
         assert_eq!(app.selected, 1, "selection clamped to the new add row");
         assert_eq!(app.selected_alias(), None); // add row
+    }
+
+    #[test]
+    fn reload_vault_uses_rotated_recipient_for_new_values() {
+        let (mut app, old_id) = app_with(&[]);
+        let new_id = generate_identity();
+        app.reload_vault(Vault::default(), new_id.to_public());
+
+        app.handle_key(ch('a'));
+        type_str(&mut app, "new-key");
+        app.handle_key(key(KeyCode::Tab));
+        type_str(&mut app, "fresh-after-rotation-9988");
+        assert!(matches!(
+            app.handle_key(key(KeyCode::Enter)),
+            Some(Effect::Save(_))
+        ));
+
+        let cipher = &app.vault.get("new-key").unwrap().cipher;
+        assert_eq!(
+            decrypt_value(&new_id, cipher).unwrap(),
+            "fresh-after-rotation-9988"
+        );
+        assert!(decrypt_value(&old_id, cipher).is_err());
+    }
+
+    #[test]
+    fn reload_vault_uses_rotated_recipient_for_edited_values() {
+        let (mut app, old_id) = app_with(&["existing"]);
+        let new_id = generate_identity();
+        let mut rotated = Vault::default();
+        rotated
+            .insert(entry("existing", &new_id.to_public()))
+            .unwrap();
+        app.reload_vault(rotated, new_id.to_public());
+
+        app.handle_key(ch('e'));
+        type_str(&mut app, "edited-after-rotation-7766");
+        assert!(matches!(
+            app.handle_key(key(KeyCode::Enter)),
+            Some(Effect::Save(_))
+        ));
+
+        let cipher = &app.vault.get("existing").unwrap().cipher;
+        assert_eq!(
+            decrypt_value(&new_id, cipher).unwrap(),
+            "edited-after-rotation-7766"
+        );
+        assert!(decrypt_value(&old_id, cipher).is_err());
     }
 
     #[test]

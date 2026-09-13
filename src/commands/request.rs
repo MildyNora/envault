@@ -84,10 +84,8 @@ pub fn cmd_request(
             return finish(&home, &meta, outcome, None);
         }
         eprintln!(
-            "envault: couldn't open a request window ({e}). Ask the user to run:\n  \
-             {} request-window {}",
-            exe.display(),
-            session.display()
+            "envault: couldn't open a request window ({e}). Ask the user to run this in their \
+             own trusted terminal:\n  envault add {name}\nThen retry the request."
         );
         return Ok(6);
     }
@@ -167,9 +165,9 @@ fn finish(
 ) -> Result<i32> {
     let (result, code) = match outcome {
         Outcome::Granted(value) => {
-            // Resolve any Keychain authorization before entering the storage
-            // lock, then reject a competing rotation inside the transaction.
-            let expected_recipient = crypto::recipient_from_identity()?;
+            // Preload the identity, then reject a competing rotation inside the
+            // transaction. Native credential revalidation may itself prompt.
+            let expected_recipient = crypto::recipient_from_identity(home)?;
             Vault::transaction_for_recipient(home, &expected_recipient, |vault, recipient| {
                 if vault.get(&meta.name).is_none() {
                     let now = now_rfc3339();
@@ -253,7 +251,11 @@ fn spawn_window(exe: &Path, session: &Path) -> Result<()> {
     // Carry the caller's vault selection into the fresh login shell that
     // `do script` spawns, so the window writes to the same vault we checked.
     let mut env_prefix = String::new();
-    for key in ["ENVAULT_HOME", "ENVAULT_IDENTITY_FILE"] {
+    for key in [
+        "ENVAULT_HOME",
+        "ENVAULT_IDENTITY_FILE",
+        "ENVAULT_IDENTITY_DIR",
+    ] {
         if let Ok(val) = std::env::var(key) {
             env_prefix.push_str(&format!("{key}={} ", shell_quote(&val)));
         }
@@ -593,7 +595,6 @@ mod tests {
             .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .unwrap();
         let code = finish(home.path(), &meta, outcome, Some(session.path())).unwrap();
-        std::env::remove_var("ENVAULT_IDENTITY_FILE");
         assert_eq!(code, 0);
 
         // stored + decrypts to exactly the granted bytes; reason recorded
@@ -616,6 +617,7 @@ mod tests {
         let result: ResultFile = serde_json::from_str(&result).unwrap();
         assert_eq!(result.outcome, "granted");
         assert!(result.note.is_none());
+        std::env::remove_var("ENVAULT_IDENTITY_FILE");
     }
 
     #[cfg(unix)]

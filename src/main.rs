@@ -46,6 +46,9 @@ enum Cmd {
         /// Succeed quietly if the vault already exists (used by installers)
         #[arg(long)]
         if_needed: bool,
+        /// Give an existing empty legacy vault a fresh, separate identity
+        #[arg(long, conflicts_with = "if_needed")]
+        empty_legacy: bool,
     },
     /// Add a secret (value via hidden prompt, or --stdin)
     Add {
@@ -134,7 +137,10 @@ fn main() {
     let cli = Cli::parse();
     let result = match cli.cmd {
         None => tui::run_tui(),
-        Some(Cmd::Init { if_needed }) => commands::init::cmd_init(if_needed),
+        Some(Cmd::Init {
+            if_needed,
+            empty_legacy,
+        }) => commands::init::cmd_init(if_needed, empty_legacy),
         Some(Cmd::Add {
             alias,
             label,
