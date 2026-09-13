@@ -458,11 +458,62 @@ fn verify_snapshot(state: &[Option<Vec<u8>>; 3], identity: &age::x25519::Identit
 }
 
 pub(crate) fn sync_rotation_directory(home: &Path) -> Result<()> {
+    #[cfg(test)]
+    directory_sync_test_error()?;
     #[cfg(unix)]
     std::fs::File::open(home)?.sync_all()?;
     #[cfg(not(unix))]
     let _ = home; // Directory fsync is not portable; power-loss durability unverified.
     Ok(())
+}
+
+// Inject an I/O failure at the directory-sync operation itself, after callers
+// have performed their rename/deletion. Failures remain active across retries.
+#[cfg(test)]
+thread_local! {
+    static DIRECTORY_SYNC_FAILURE: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+    static DIRECTORY_SYNC_ERRORS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn directory_sync_test_error() -> std::io::Result<()> {
+    DIRECTORY_SYNC_FAILURE.with(|remaining| match remaining.get() {
+        Some(0) => {
+            DIRECTORY_SYNC_ERRORS.with(|count| count.set(count.get() + 1));
+            Err(std::io::Error::other("injected rotation directory sync failure"))
+        }
+        Some(n) => {
+            remaining.set(Some(n - 1));
+            Ok(())
+        }
+        None => Ok(()),
+    })
+}
+
+#[cfg(test)]
+pub(crate) struct DirectorySyncFailure;
+
+#[cfg(test)]
+impl DirectorySyncFailure {
+    pub(crate) fn after(successful_calls: usize) -> Self {
+        DIRECTORY_SYNC_FAILURE.with(|remaining| {
+            assert!(remaining.get().is_none());
+            remaining.set(Some(successful_calls));
+        });
+        DIRECTORY_SYNC_ERRORS.with(|count| count.set(0));
+        Self
+    }
+
+    pub(crate) fn errors(&self) -> usize {
+        DIRECTORY_SYNC_ERRORS.with(|count| count.get())
+    }
+}
+
+#[cfg(test)]
+impl Drop for DirectorySyncFailure {
+    fn drop(&mut self) {
+        DIRECTORY_SYNC_FAILURE.with(|remaining| remaining.set(None));
+    }
 }
 
 fn replace_synced(home: &Path, name: &str, bytes: &[u8]) -> Result<()> {
