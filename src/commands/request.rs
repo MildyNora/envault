@@ -167,9 +167,10 @@ fn finish(
 ) -> Result<i32> {
     let (result, code) = match outcome {
         Outcome::Granted(value) => {
-            let recipient = crypto::recipient_from_identity()?;
-            let cipher = crypto::encrypt_value(&recipient, &value)?;
-            Vault::transaction(home, |vault| {
+            // Resolve any Keychain authorization before entering the storage
+            // lock, then reject a competing rotation inside the transaction.
+            let expected_recipient = crypto::recipient_from_identity()?;
+            Vault::transaction_for_recipient(home, &expected_recipient, |vault, recipient| {
                 if vault.get(&meta.name).is_none() {
                     let now = now_rfc3339();
                     vault.insert(SecretEntry {
@@ -179,7 +180,7 @@ fn finish(
                             meta.label.clone()
                         },
                         alias: meta.name.clone(),
-                        cipher,
+                        cipher: crypto::encrypt_value(recipient, &value)?,
                         url: None,
                         created_at: now.clone(),
                         updated_at: now,

@@ -97,7 +97,7 @@ fn event_loop(app: &mut App, home: &std::path::Path) -> Result<()> {
         match effect {
             None => {}
             Some(Effect::Quit) => return Ok(()),
-            Some(Effect::Save(change)) => persist_vault_change(app, home, change),
+            Some(Effect::Save(change)) => persist_vault_change(app, home, *change),
             Some(Effect::Decrypt { alias }) => match decrypt(app, home, "reveal", &alias) {
                 Ok(value) => app.provide_plaintext(value),
                 Err(e) => app.set_error(format!("decrypt failed: {e:#}")),
@@ -156,18 +156,38 @@ fn event_loop(app: &mut App, home: &std::path::Path) -> Result<()> {
 }
 
 fn persist_vault_change(app: &mut App, home: &std::path::Path, change: VaultChange) {
-    let saved = Vault::transaction(home, |vault| {
+    let saved = Vault::transaction_for_recipient(home, &app.recipient, |vault, _recipient| {
         match change {
             VaultChange::Insert(entry) => vault.insert(entry)?,
-            VaultChange::Update(entry) => {
+            VaultChange::Update {
+                expected,
+                mut updated,
+                replace_cipher,
+            } => {
                 let stored = vault
                     .secrets
                     .iter_mut()
-                    .find(|stored| stored.alias == entry.alias)
+                    .find(|stored| stored.alias == updated.alias)
                     .context("secret was removed before the edit could be saved")?;
-                *stored = entry;
+                anyhow::ensure!(
+                    *stored == expected,
+                    "secret changed after the edit was opened — reopen it and retry"
+                );
+                if !replace_cipher {
+                    updated.cipher.clone_from(&stored.cipher);
+                }
+                *stored = updated;
             }
-            VaultChange::Delete(alias) => vault.secrets.retain(|entry| entry.alias != alias),
+            VaultChange::Delete(expected) => {
+                let stored = vault
+                    .get(&expected.alias)
+                    .context("secret was removed before deletion")?;
+                anyhow::ensure!(
+                    *stored == expected,
+                    "secret changed before deletion — review it and retry"
+                );
+                vault.secrets.retain(|entry| entry.alias != expected.alias);
+            }
         }
         Ok(())
     });
@@ -218,6 +238,7 @@ fn copy_with_autoclear(value: String) -> Result<()> {
 mod tests {
     use super::*;
     use crate::store::{now_rfc3339, SecretEntry};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use tempfile::TempDir;
 
     fn entry(alias: &str) -> SecretEntry {
@@ -232,11 +253,25 @@ mod tests {
         }
     }
 
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn type_text(app: &mut App, text: &str) {
+        for c in text.chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+        }
+    }
+
     #[test]
     fn dashboard_save_preserves_an_external_addition() {
+        let _env = crypto::test_env_lock();
         let home = TempDir::new().unwrap();
+        std::env::set_var("ENVAULT_IDENTITY_FILE", home.path().join("identity.txt"));
+        let identity = crypto::generate_identity();
+        crypto::store_identity(&identity, home.path()).unwrap();
         Vault::default().save(home.path()).unwrap();
-        let recipient = crypto::generate_identity().to_public();
+        let recipient = identity.to_public();
         let mut app = App::new(Vault::load(home.path()).unwrap(), recipient);
 
         Vault::transaction(home.path(), |vault| vault.insert(entry("external"))).unwrap();
@@ -249,5 +284,82 @@ mod tests {
         let stored = Vault::load(home.path()).unwrap();
         assert!(stored.get("external").is_some());
         assert!(stored.get("dashboard").is_some());
+        std::env::remove_var("ENVAULT_IDENTITY_FILE");
+    }
+
+    #[test]
+    fn dashboard_rejects_a_pending_add_after_identity_rotation() {
+        let _env = crypto::test_env_lock();
+        let home = TempDir::new().unwrap();
+        let identity_file = home.path().join("identity.txt");
+        std::env::set_var("ENVAULT_IDENTITY_FILE", &identity_file);
+        let old_identity = crypto::generate_identity();
+        crypto::store_identity(&old_identity, home.path()).unwrap();
+        crypto::store_recipient(&old_identity, home.path()).unwrap();
+        Vault::default().save(home.path()).unwrap();
+
+        let mut app = App::new(Vault::load(home.path()).unwrap(), old_identity.to_public());
+        app.handle_key(key(KeyCode::Char('a')));
+        type_text(&mut app, "queued-key");
+        app.handle_key(key(KeyCode::Tab));
+        type_text(&mut app, "synthetic-queued-value");
+
+        crate::commands::rotate::rotate_in_place(home.path()).unwrap();
+        let change = match app.handle_key(key(KeyCode::Enter)) {
+            Some(Effect::Save(change)) => change,
+            _ => panic!("expected save effect"),
+        };
+        persist_vault_change(&mut app, home.path(), *change);
+
+        assert!(app.status.contains("save failed"), "status: {}", app.status);
+        assert!(Vault::load(home.path())
+            .unwrap()
+            .get("queued-key")
+            .is_none());
+        std::env::remove_var("ENVAULT_IDENTITY_FILE");
+    }
+
+    #[test]
+    fn dashboard_metadata_edit_does_not_restore_a_stale_cipher() {
+        let _env = crypto::test_env_lock();
+        let home = TempDir::new().unwrap();
+        let identity_file = home.path().join("identity.txt");
+        std::env::set_var("ENVAULT_IDENTITY_FILE", &identity_file);
+        let identity = crypto::generate_identity();
+        crypto::store_identity(&identity, home.path()).unwrap();
+        crypto::store_recipient(&identity, home.path()).unwrap();
+        let mut initial = Vault::default();
+        let mut original = entry("editable");
+        original.cipher = crypto::encrypt_value(&identity.to_public(), "original-value").unwrap();
+        initial.insert(original).unwrap();
+        initial.save(home.path()).unwrap();
+
+        let mut app = App::new(Vault::load(home.path()).unwrap(), identity.to_public());
+        app.handle_key(key(KeyCode::Char('e')));
+        app.handle_key(key(KeyCode::Tab));
+        type_text(&mut app, " updated");
+
+        let external_cipher =
+            crypto::encrypt_value(&identity.to_public(), "external-value").unwrap();
+        Vault::transaction(home.path(), |vault| {
+            let stored = vault.get("editable").unwrap().clone();
+            vault.secrets.retain(|entry| entry.alias != "editable");
+            vault.insert(SecretEntry {
+                cipher: external_cipher.clone(),
+                updated_at: now_rfc3339(),
+                ..stored
+            })
+        })
+        .unwrap();
+
+        let change = match app.handle_key(key(KeyCode::Enter)) {
+            Some(Effect::Save(change)) => change,
+            _ => panic!("expected save effect"),
+        };
+        persist_vault_change(&mut app, home.path(), *change);
+
+        let stored = Vault::load(home.path()).unwrap();
+        assert_eq!(stored.get("editable").unwrap().cipher, external_cipher);
+        std::env::remove_var("ENVAULT_IDENTITY_FILE");
     }
 }

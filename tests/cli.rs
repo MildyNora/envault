@@ -52,6 +52,17 @@ impl Default for TestEnv {
     }
 }
 
+fn wait_for_files(paths: &[&std::path::Path]) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !paths.iter().all(|path| path.exists()) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for explicit child-process signal"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
 #[test]
 fn init_creates_vault_recipient_and_identity() {
     let te = TestEnv::new();
@@ -97,11 +108,17 @@ fn add_then_ls_shows_alias_but_never_value() {
 fn concurrent_adds_both_survive() {
     let te = TestEnv::new();
     te.init();
+    let first_ready = te.home.path().join("first-ready");
+    let second_ready = te.home.path().join("second-ready");
+    let first_release = te.home.path().join("first-release");
+    let second_release = te.home.path().join("second-release");
 
-    let spawn_add = |alias: &str| {
+    let spawn_add = |alias: &str, ready: &std::path::Path, release: &std::path::Path| {
         std::process::Command::new(env!("CARGO_BIN_EXE_envault"))
             .env("ENVAULT_HOME", te.home.path())
             .env("ENVAULT_IDENTITY_FILE", te.identity_file())
+            .env("ENVAULT_TEST_TRANSACTION_READY", ready)
+            .env("ENVAULT_TEST_TRANSACTION_RELEASE", release)
             .current_dir(te.project.path())
             .args(["add", alias, "--stdin"])
             .stdin(std::process::Stdio::piped())
@@ -111,11 +128,8 @@ fn concurrent_adds_both_survive() {
             .unwrap()
     };
 
-    let mut first = spawn_add("concurrent-first");
-    let mut second = spawn_add("concurrent-second");
-    // `add` loads the vault before reading stdin. Let both processes reach the
-    // blocked read, then release them together so they mutate the same snapshot.
-    std::thread::sleep(std::time::Duration::from_millis(500));
+    let mut first = spawn_add("concurrent-first", &first_ready, &first_release);
+    let mut second = spawn_add("concurrent-second", &second_ready, &second_release);
     std::io::Write::write_all(
         first.stdin.as_mut().unwrap(),
         b"SYNTHETIC-CONCURRENT-FIRST-9988\n",
@@ -129,6 +143,13 @@ fn concurrent_adds_both_survive() {
     drop(first.stdin.take());
     drop(second.stdin.take());
 
+    // Each child signals after it has authenticated and read stdin, then waits
+    // immediately before the transaction. This makes overlap deterministic
+    // without guessing how long process startup takes.
+    wait_for_files(&[&first_ready, &second_ready]);
+    std::fs::write(&first_release, b"release").unwrap();
+    std::fs::write(&second_release, b"release").unwrap();
+
     let first = first.wait_with_output().unwrap();
     let second = second.wait_with_output().unwrap();
     assert!(first.status.success(), "first add failed: {first:?}");
@@ -138,6 +159,104 @@ fn concurrent_adds_both_survive() {
     let listed: serde_json::Value = serde_json::from_slice(&out.get_output().stdout).unwrap();
     let aliases = listed.as_array().unwrap();
     assert_eq!(aliases.len(), 2, "both successful additions must remain");
+}
+
+#[test]
+fn queued_add_rejects_identity_rotated_before_transaction() {
+    let te = TestEnv::new();
+    te.init();
+    let ready = te.home.path().join("queued-add-ready");
+    let release = te.home.path().join("queued-add-release");
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_envault"))
+        .env("ENVAULT_HOME", te.home.path())
+        .env("ENVAULT_IDENTITY_FILE", te.identity_file())
+        .env("ENVAULT_TEST_TRANSACTION_READY", &ready)
+        .env("ENVAULT_TEST_TRANSACTION_RELEASE", &release)
+        .current_dir(te.project.path())
+        .args(["add", "queued-key", "--stdin"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::io::Write::write_all(
+        child.stdin.as_mut().unwrap(),
+        b"SYNTHETIC-QUEUED-VALUE-9988\n",
+    )
+    .unwrap();
+    drop(child.stdin.take());
+    wait_for_files(&[&ready]);
+
+    te.envault().arg("rotate").assert().success();
+    std::fs::write(&release, b"release").unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        !output.status.success(),
+        "queued add unexpectedly succeeded"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("identity changed"),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let listed: serde_json::Value = serde_json::from_slice(
+        te.envault()
+            .args(["ls", "--json"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .as_slice(),
+    )
+    .unwrap();
+    assert!(listed.as_array().unwrap().is_empty());
+}
+
+#[test]
+fn queued_import_rejects_identity_rotated_before_transaction() {
+    let te = TestEnv::new();
+    te.init();
+    let dotenv = te.project.path().join("queued.env");
+    std::fs::write(&dotenv, "QUEUED_KEY=SYNTHETIC-QUEUED-IMPORT-7766\n").unwrap();
+    let ready = te.home.path().join("queued-import-ready");
+    let release = te.home.path().join("queued-import-release");
+    let child = std::process::Command::new(env!("CARGO_BIN_EXE_envault"))
+        .env("ENVAULT_HOME", te.home.path())
+        .env("ENVAULT_IDENTITY_FILE", te.identity_file())
+        .env("ENVAULT_TEST_TRANSACTION_READY", &ready)
+        .env("ENVAULT_TEST_TRANSACTION_RELEASE", &release)
+        .current_dir(te.project.path())
+        .args(["import", dotenv.to_str().unwrap()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    wait_for_files(&[&ready]);
+
+    te.envault().arg("rotate").assert().success();
+    std::fs::write(&release, b"release").unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        !output.status.success(),
+        "queued import unexpectedly succeeded"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("identity changed"),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let listed: serde_json::Value = serde_json::from_slice(
+        te.envault()
+            .args(["ls", "--json"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .as_slice(),
+    )
+    .unwrap();
+    assert!(listed.as_array().unwrap().is_empty());
+    assert!(!te.project.path().join("envault.toml").exists());
 }
 
 #[test]

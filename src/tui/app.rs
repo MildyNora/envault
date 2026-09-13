@@ -70,7 +70,7 @@ pub enum Mode {
 
 #[derive(Debug)]
 pub enum Effect {
-    Save(VaultChange),
+    Save(Box<VaultChange>),
     Decrypt { alias: String },
     Copy { alias: String },
     Rotate,
@@ -83,8 +83,12 @@ pub enum Effect {
 #[derive(Debug)]
 pub enum VaultChange {
     Insert(SecretEntry),
-    Update(SecretEntry),
-    Delete(String),
+    Update {
+        expected: SecretEntry,
+        updated: SecretEntry,
+        replace_cipher: bool,
+    },
+    Delete(SecretEntry),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -320,10 +324,11 @@ impl App {
         self.mode = Mode::List;
         if let KeyCode::Char('y') = key.code {
             if let Some(alias) = self.selected_alias() {
+                let expected = self.vault.get(&alias).expect("selected exists").clone();
                 self.vault.secrets.retain(|s| s.alias != alias);
                 self.clamp_selection();
                 self.set_success(format!("deleted '{alias}'"));
-                return Some(Effect::Save(VaultChange::Delete(alias)));
+                return Some(Effect::Save(Box::new(VaultChange::Delete(expected))));
             }
         }
         None
@@ -470,27 +475,39 @@ impl App {
                     }
                 }
             };
-            let updated =
-                if let Some(entry) = self.vault.secrets.iter_mut().find(|s| s.alias == target) {
-                    entry.label = if label.is_empty() {
-                        target.clone()
-                    } else {
-                        label
-                    };
-                    entry.url = if url.is_empty() { None } else { Some(url) };
-                    entry.notes = notes;
-                    if let Some(c) = cipher {
-                        entry.cipher = c;
-                    }
-                    entry.updated_at = now_rfc3339();
-                    entry.clone()
-                } else {
+            let replace_cipher = cipher.is_some();
+            let expected = match self.vault.secrets.iter().find(|s| s.alias == target) {
+                Some(entry) => entry.clone(),
+                None => {
                     self.set_error(format!("name '{target}' no longer exists"));
                     return None;
-                };
+                }
+            };
+            let mut updated = expected.clone();
+            updated.label = if label.is_empty() {
+                target.clone()
+            } else {
+                label
+            };
+            updated.url = if url.is_empty() { None } else { Some(url) };
+            updated.notes = notes;
+            if let Some(c) = cipher {
+                updated.cipher = c;
+            }
+            updated.updated_at = now_rfc3339();
+            *self
+                .vault
+                .secrets
+                .iter_mut()
+                .find(|entry| entry.alias == target)
+                .expect("entry was just found") = updated.clone();
             self.set_success(format!("updated '{target}'"));
             self.mode = Mode::List;
-            return Some(Effect::Save(VaultChange::Update(updated)));
+            return Some(Effect::Save(Box::new(VaultChange::Update {
+                expected,
+                updated,
+                replace_cipher,
+            })));
         }
         // Add
         if !is_valid_alias(&name) {
@@ -533,7 +550,7 @@ impl App {
         self.vault.insert(entry.clone()).ok()?;
         self.set_success(format!("added '{name}'"));
         self.mode = Mode::List;
-        Some(Effect::Save(VaultChange::Insert(entry)))
+        Some(Effect::Save(Box::new(VaultChange::Insert(entry))))
     }
 }
 

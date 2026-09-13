@@ -7,7 +7,7 @@ use std::path::Path;
 
 use crate::paths::vault_file;
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct SecretEntry {
     pub alias: String,
     pub label: String,
@@ -57,12 +57,35 @@ impl Vault {
 
     /// Reload, mutate, and atomically persist the vault while holding one
     /// inter-process lock. The returned vault is the exact committed state.
+    #[cfg(test)]
     pub fn transaction<T>(
         home: &Path,
         mutate: impl FnOnce(&mut Vault) -> Result<T>,
     ) -> Result<(T, Vault)> {
         Self::with_exclusive(home, |mut vault| {
             let result = mutate(&mut vault)?;
+            vault.save_unlocked(home)?;
+            Ok((result, vault))
+        })
+    }
+
+    /// Commit an encryption-related mutation only if the identity authenticated
+    /// before taking the storage lock is still authoritative after acquisition.
+    /// This keeps any Keychain/biometric interaction outside the critical
+    /// section while preventing a queued writer from using a retired key.
+    pub fn transaction_for_recipient<T>(
+        home: &Path,
+        expected_recipient: &age::x25519::Recipient,
+        mutate: impl FnOnce(&mut Vault, &age::x25519::Recipient) -> Result<T>,
+    ) -> Result<(T, Vault)> {
+        wait_at_test_transaction_barrier()?;
+        Self::with_exclusive(home, |mut vault| {
+            let current_recipient = crate::crypto::recipient_from_identity()?;
+            anyhow::ensure!(
+                current_recipient == *expected_recipient,
+                "vault identity changed while waiting for the storage lock — retry"
+            );
+            let result = mutate(&mut vault, &current_recipient)?;
             vault.save_unlocked(home)?;
             Ok((result, vault))
         })
@@ -115,6 +138,30 @@ impl Vault {
         self.secrets.sort_by_key(|s| s.alias.clone());
         Ok(())
     }
+}
+
+#[cfg(debug_assertions)]
+fn wait_at_test_transaction_barrier() -> Result<()> {
+    let (Ok(ready), Ok(release)) = (
+        std::env::var("ENVAULT_TEST_TRANSACTION_READY"),
+        std::env::var("ENVAULT_TEST_TRANSACTION_RELEASE"),
+    ) else {
+        return Ok(());
+    };
+    fs::write(&ready, b"ready").context("signaling test transaction readiness")?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !Path::new(&release).exists() {
+        if std::time::Instant::now() >= deadline {
+            bail!("timed out waiting for test transaction release");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    Ok(())
+}
+
+#[cfg(not(debug_assertions))]
+fn wait_at_test_transaction_barrier() -> Result<()> {
+    Ok(())
 }
 
 fn open_lock(home: &Path) -> Result<File> {
