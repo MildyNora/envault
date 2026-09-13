@@ -63,25 +63,41 @@ mod tests {
             let reader = scope.spawn(move || {
                 unlock_authorized(home, "run", "before-rotation", true, || {
                     selected_tx.send(()).unwrap();
-                    release_rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+                    release_rx
+                        .recv_timeout(std::time::Duration::from_secs(10))
+                        .unwrap();
                     Ok(())
-                }).unwrap().to_public()
+                })
+                .unwrap()
+                .to_public()
             });
-            selected_rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
-            let probe = std::fs::OpenOptions::new().read(true).write(true)
-                .open(home.join("vault.lock")).unwrap();
-            assert!(probe.try_lock().is_err(), "rotation must not enter after key selection");
+            selected_rx
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .unwrap();
+            let probe = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(home.join("vault.lock"))
+                .unwrap();
+            assert!(
+                probe.try_lock().is_err(),
+                "rotation must not enter after key selection"
+            );
             release_tx.send(()).unwrap();
             assert_eq!(reader.join().unwrap(), old.to_public());
         });
         // Rotate after the selected-generation append; history must migrate intact.
         crate::commands::rotate::rotate_in_place(home.path()).unwrap();
-        let identity = unlock_authorized(home.path(), "run", "after-rotation", true, || Ok(())).unwrap();
+        let identity =
+            unlock_authorized(home.path(), "run", "after-rotation", true, || Ok(())).unwrap();
         let _lock = crate::store::lock_generation(home.path()).unwrap();
         let key = audit::verification_key_locked(home.path(), &identity).unwrap();
         let entries = audit::read_locked(home.path()).unwrap();
         assert_eq!(entries.len(), 2);
-        assert_eq!(audit::verify_locked(home.path(), key.expose_secret().as_bytes(), &entries), audit::Integrity::Ok);
+        assert_eq!(
+            audit::verify_locked(home.path(), key.expose_secret().as_bytes(), &entries),
+            audit::Integrity::Ok
+        );
         std::env::remove_var("ENVAULT_IDENTITY_DIR");
     }
 }

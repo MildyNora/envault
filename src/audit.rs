@@ -260,7 +260,10 @@ fn unwrap_key(identity: &age::x25519::Identity, raw: &str) -> Result<String> {
 /// Return the audit-MAC key for the active identity. Legacy vaults use the
 /// identity itself until their first rotation migrates to a stable derived key;
 /// that key is then authenticated and re-encrypted to each new identity.
-pub(crate) fn verification_key_locked(home: &Path, identity: &age::x25519::Identity) -> Result<SecretString> {
+pub(crate) fn verification_key_locked(
+    home: &Path,
+    identity: &age::x25519::Identity,
+) -> Result<SecretString> {
     // Pending rotation is recovered by load_identity_locked before this call.
     // Never select an uncommitted staged wrapper independently of vault recovery.
     match std::fs::read_to_string(key_file(home)) {
@@ -452,7 +455,10 @@ fn verify_snapshot(state: &[Option<Vec<u8>>; 3], identity: &age::x25519::Identit
             std::str::from_utf8(head)?.trim() == head_mac(key, entries.len(), last),
             "audit recovery snapshot anchor verification failed"
         ),
-        None => anyhow::ensure!(entries.is_empty(), "audit recovery snapshot anchor is missing"),
+        None => anyhow::ensure!(
+            entries.is_empty(),
+            "audit recovery snapshot anchor is missing"
+        ),
     }
     Ok(())
 }
@@ -480,7 +486,9 @@ fn directory_sync_test_error() -> std::io::Result<()> {
     DIRECTORY_SYNC_FAILURE.with(|remaining| match remaining.get() {
         Some(0) => {
             DIRECTORY_SYNC_ERRORS.with(|count| count.set(count.get() + 1));
-            Err(std::io::Error::other("injected rotation directory sync failure"))
+            Err(std::io::Error::other(
+                "injected rotation directory sync failure",
+            ))
         }
         Some(n) => {
             remaining.set(Some(n - 1));
@@ -545,7 +553,9 @@ pub(crate) fn prepare_snapshot_locked(
     let mut after = before.clone();
     if let Some(prepared) = prepare_key_rotation_locked(home, old, new)? {
         for file in prepared.files {
-            let index = AUDIT_FILES.iter().position(|name| home.join(name) == file.target)
+            let index = AUDIT_FILES
+                .iter()
+                .position(|name| home.join(name) == file.target)
                 .context("unexpected audit rotation target")?;
             after[index] = Some(std::fs::read(&file.staged)?);
             // Staged files are not authoritative and never used by key selection.
@@ -553,7 +563,11 @@ pub(crate) fn prepare_snapshot_locked(
         }
     }
     verify_snapshot(&after, new)?;
-    let bytes = serde_json::to_vec(&RotationSnapshot { version: 1, before, after })?;
+    let bytes = serde_json::to_vec(&RotationSnapshot {
+        version: 1,
+        before,
+        after,
+    })?;
     let digest = hex(&Sha256::digest(&bytes));
     replace_synced(home, "audit.rotation.json", &bytes)?;
     anyhow::ensure!(
@@ -572,10 +586,17 @@ pub(crate) fn recover_snapshot_locked(
     identity: &age::x25519::Identity,
 ) -> Result<()> {
     let bytes = std::fs::read(home.join("audit.rotation.json"))?;
-    anyhow::ensure!(hex(&Sha256::digest(&bytes)) == digest, "audit recovery snapshot digest mismatch");
+    anyhow::ensure!(
+        hex(&Sha256::digest(&bytes)) == digest,
+        "audit recovery snapshot digest mismatch"
+    );
     let snapshot: RotationSnapshot = serde_json::from_slice(&bytes)?;
     anyhow::ensure!(snapshot.version == 1, "unsupported audit recovery snapshot");
-    let target = if activated { &snapshot.after } else { &snapshot.before };
+    let target = if activated {
+        &snapshot.after
+    } else {
+        &snapshot.before
+    };
     verify_snapshot(target, identity)?;
     let current = capture(home)?;
     for (index, value) in current.iter().enumerate() {
@@ -648,7 +669,10 @@ mod tests {
         record_locked(home.path(), KEY, "run", "b").unwrap();
         let mut entries = read_locked(home.path()).unwrap();
         entries[0].detail = "TAMPERED".into();
-        assert_eq!(verify_locked(home.path(), KEY, &entries), Integrity::Broken(0));
+        assert_eq!(
+            verify_locked(home.path(), KEY, &entries),
+            Integrity::Broken(0)
+        );
     }
 
     #[test]
@@ -659,7 +683,10 @@ mod tests {
         }
         let mut entries = read_locked(home.path()).unwrap();
         entries.remove(1);
-        assert_eq!(verify_locked(home.path(), KEY, &entries), Integrity::Broken(1));
+        assert_eq!(
+            verify_locked(home.path(), KEY, &entries),
+            Integrity::Broken(1)
+        );
     }
 
     #[test]
@@ -674,7 +701,10 @@ mod tests {
         std::fs::write(log_file(home.path()), format!("{}\n", kept.join("\n"))).unwrap();
         let entries = read_locked(home.path()).unwrap();
         assert_eq!(entries.len(), 2);
-        assert_eq!(verify_locked(home.path(), KEY, &entries), Integrity::HeadMismatch);
+        assert_eq!(
+            verify_locked(home.path(), KEY, &entries),
+            Integrity::HeadMismatch
+        );
     }
 
     #[test]

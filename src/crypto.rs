@@ -450,9 +450,7 @@ pub(crate) fn recover_rotation_locked(home: &Path) -> Result<()> {
     };
     let identity = parse_identity(key)?;
     if let Some(digest) = &record.audit_snapshot {
-        crate::audit::recover_snapshot_locked(
-            home, digest, key == &record.new_key, &identity,
-        )?;
+        crate::audit::recover_snapshot_locked(home, digest, key == &record.new_key, &identity)?;
     }
     store_identity_locked(&identity, home)?;
     let saved = get_credential(&stable)?.context("recovered credential missing")?;
@@ -757,22 +755,40 @@ mod tests {
             let vault: crate::store::Vault = serde_json::from_slice(&activated).unwrap();
             assert_eq!(vault.secrets.len(), usize::from(!empty));
             for entry in &vault.secrets {
-                assert_eq!(decrypt_value(&new, &entry.cipher).unwrap(), "synthetic-value");
+                assert_eq!(
+                    decrypt_value(&new, &entry.cipher).unwrap(),
+                    "synthetic-value"
+                );
             }
             for name in ["audit.log", "audit.head", "audit.key.age"] {
                 assert!(!home.path().join(name).exists());
             }
             assert!(recover_rotation_locked(home.path()).is_err());
             assert_eq!(fault.errors(), 3);
-            assert_eq!(get_credential(&account).unwrap().as_deref(), Some(protected.as_str()));
-            assert_eq!(fs::read(home.path().join("audit.rotation.json")).unwrap(), snapshot);
-            assert_eq!(fs::read(crate::paths::vault_file(home.path())).unwrap(), activated);
+            assert_eq!(
+                get_credential(&account).unwrap().as_deref(),
+                Some(protected.as_str())
+            );
+            assert_eq!(
+                fs::read(home.path().join("audit.rotation.json")).unwrap(),
+                snapshot
+            );
+            assert_eq!(
+                fs::read(crate::paths::vault_file(home.path())).unwrap(),
+                activated
+            );
             drop(fault);
             recover_rotation_locked(home.path()).unwrap();
             assert!(get_credential(&account).unwrap().is_none());
             assert!(!home.path().join("audit.rotation.json").exists());
-            assert_eq!(load_identity_locked(home.path()).unwrap().to_public(), new.to_public());
-            assert_eq!(fs::read(crate::paths::vault_file(home.path())).unwrap(), activated);
+            assert_eq!(
+                load_identity_locked(home.path()).unwrap().to_public(),
+                new.to_public()
+            );
+            assert_eq!(
+                fs::read(crate::paths::vault_file(home.path())).unwrap(),
+                activated
+            );
         }
     }
 
@@ -788,8 +804,12 @@ mod tests {
             seed_vault(home.path(), &old);
             let _lock = crate::store::lock_generation(home.path()).unwrap();
             crate::audit::record_locked(
-                home.path(), old.to_string().expose_secret().as_bytes(), "run", "synthetic",
-            ).unwrap();
+                home.path(),
+                old.to_string().expose_secret().as_bytes(),
+                "run",
+                "synthetic",
+            )
+            .unwrap();
             let before = fs::read(crate::paths::vault_file(home.path())).unwrap();
             let mut vault = crate::store::Vault::load_locked(home.path()).unwrap();
             vault.secrets[0].cipher = encrypt_value(&new.to_public(), "synthetic-value").unwrap();
@@ -807,13 +827,21 @@ mod tests {
             }
             // Earlier audit components already match. Only the final wrapper
             // replacement (forward) or deletion (rollback) remains to perform.
-            for (index, name) in ["audit.log", "audit.head", "audit.key.age"].iter().enumerate() {
+            for (index, name) in ["audit.log", "audit.head", "audit.key.age"]
+                .iter()
+                .enumerate()
+            {
                 let state = if index == 2 {
-                    if rollback { "after" } else { "before" }
+                    if rollback {
+                        "after"
+                    } else {
+                        "before"
+                    }
                 } else {
                     target
                 };
-                let bytes: Option<Vec<u8>> = serde_json::from_value(states[state][index].clone()).unwrap();
+                let bytes: Option<Vec<u8>> =
+                    serde_json::from_value(states[state][index].clone()).unwrap();
                 match bytes {
                     Some(bytes) => fs::write(home.path().join(name), bytes).unwrap(),
                     None => assert!(!home.path().join(name).exists()),
@@ -824,20 +852,36 @@ mod tests {
             assert!(error.downcast_ref::<std::io::Error>().is_some());
             assert_eq!(fault.errors(), 1);
             // The real replacement/deletion ran before the injected sync error.
-            for (index, name) in ["audit.log", "audit.head", "audit.key.age"].iter().enumerate() {
-                let expected: Option<Vec<u8>> = serde_json::from_value(states[target][index].clone()).unwrap();
+            for (index, name) in ["audit.log", "audit.head", "audit.key.age"]
+                .iter()
+                .enumerate()
+            {
+                let expected: Option<Vec<u8>> =
+                    serde_json::from_value(states[target][index].clone()).unwrap();
                 match expected {
                     Some(bytes) => assert_eq!(fs::read(home.path().join(name)).unwrap(), bytes),
                     None => assert!(!home.path().join(name).exists()),
                 }
             }
-            assert_eq!(get_credential(&account).unwrap().as_deref(), Some(protected.as_str()));
-            assert_eq!(fs::read(home.path().join("audit.rotation.json")).unwrap(), snapshot);
+            assert_eq!(
+                get_credential(&account).unwrap().as_deref(),
+                Some(protected.as_str())
+            );
+            assert_eq!(
+                fs::read(home.path().join("audit.rotation.json")).unwrap(),
+                snapshot
+            );
             // All bytes now match, but the final directory sync must still run.
             assert!(recover_rotation_locked(home.path()).is_err());
             assert_eq!(fault.errors(), 2);
-            assert_eq!(get_credential(&account).unwrap().as_deref(), Some(protected.as_str()));
-            assert_eq!(fs::read(home.path().join("audit.rotation.json")).unwrap(), snapshot);
+            assert_eq!(
+                get_credential(&account).unwrap().as_deref(),
+                Some(protected.as_str())
+            );
+            assert_eq!(
+                fs::read(home.path().join("audit.rotation.json")).unwrap(),
+                snapshot
+            );
             drop(fault);
             recover_rotation_locked(home.path()).unwrap();
             assert!(get_credential(&account).unwrap().is_none());
@@ -846,10 +890,21 @@ mod tests {
             assert_eq!(identity.to_public(), selected.to_public());
             let key = crate::audit::verification_key_locked(home.path(), &identity).unwrap();
             let entries = crate::audit::read_locked(home.path()).unwrap();
-            assert_eq!(crate::audit::verify_locked(home.path(), key.expose_secret().as_bytes(), &entries),
-                crate::audit::Integrity::Ok);
-            assert_eq!(decrypt_value(&identity, &crate::store::Vault::load_locked(home.path()).unwrap().secrets[0].cipher).unwrap(),
-                "synthetic-value");
+            assert_eq!(
+                crate::audit::verify_locked(home.path(), key.expose_secret().as_bytes(), &entries),
+                crate::audit::Integrity::Ok
+            );
+            assert_eq!(
+                decrypt_value(
+                    &identity,
+                    &crate::store::Vault::load_locked(home.path())
+                        .unwrap()
+                        .secrets[0]
+                        .cipher
+                )
+                .unwrap(),
+                "synthetic-value"
+            );
         }
     }
 
@@ -869,8 +924,11 @@ mod tests {
                         } else {
                             seed_vault(home.path(), &first);
                         }
-                        fs::write(home.path().join("config.json"),
-                            r#"{"audit_log":true,"touch_id":false}"#).unwrap();
+                        fs::write(
+                            home.path().join("config.json"),
+                            r#"{"audit_log":true,"touch_id":false}"#,
+                        )
+                        .unwrap();
                         crate::access::unlock(home.path(), "run", "synthetic-before").unwrap();
                         if previously_rotated {
                             crate::commands::rotate::rotate_in_place(home.path()).unwrap();
@@ -880,14 +938,20 @@ mod tests {
                         let before = fs::read(crate::paths::vault_file(home.path())).unwrap();
                         let mut vault = crate::store::Vault::load(home.path()).unwrap();
                         for entry in &mut vault.secrets {
-                            entry.cipher = encrypt_value(&new.to_public(), "synthetic-value").unwrap();
+                            entry.cipher =
+                                encrypt_value(&new.to_public(), "synthetic-value").unwrap();
                         }
                         let after = serde_json::to_vec_pretty(&vault).unwrap();
-                        let expected_new = if empty { activation >= 1 } else { activation == 2 };
+                        let expected_new = if empty {
+                            activation >= 1
+                        } else {
+                            activation == 2
+                        };
                         let expected = if expected_new { &new } else { &old };
                         {
                             let _lock = crate::store::lock_generation(home.path()).unwrap();
-                            prepare_rotation_locked(home.path(), &old, &new, &before, &after).unwrap();
+                            prepare_rotation_locked(home.path(), &old, &new, &before, &after)
+                                .unwrap();
                             let account = recovery_account(home.path()).unwrap().unwrap();
                             let protected = get_credential(&account).unwrap();
                             assert!(protected.as_ref().unwrap().len() < 2048);
@@ -900,7 +964,8 @@ mod tests {
                                 // Model interrupted audit activation while the old vault survives.
                                 let snapshot: serde_json::Value = serde_json::from_slice(
                                     &fs::read(home.path().join("audit.rotation.json")).unwrap(),
-                                ).unwrap();
+                                )
+                                .unwrap();
                                 let post_log: Option<Vec<u8>> =
                                     serde_json::from_value(snapshot["after"][0].clone()).unwrap();
                                 if let Some(log) = post_log {
@@ -915,12 +980,26 @@ mod tests {
                             assert!(get_credential(&account).unwrap().is_none());
                             let recovered = load_identity_locked(home.path()).unwrap();
                             assert_eq!(recovered.to_public(), expected.to_public());
-                            let key = crate::audit::verification_key_locked(home.path(), &recovered).unwrap();
+                            let key =
+                                crate::audit::verification_key_locked(home.path(), &recovered)
+                                    .unwrap();
                             let entries = crate::audit::read_locked(home.path()).unwrap();
-                            assert_eq!(crate::audit::verify_locked(home.path(), key.expose_secret().as_bytes(), &entries),
-                                crate::audit::Integrity::Ok);
-                            for entry in crate::store::Vault::load_locked(home.path()).unwrap().secrets {
-                                assert_eq!(decrypt_value(&recovered, &entry.cipher).unwrap(), "synthetic-value");
+                            assert_eq!(
+                                crate::audit::verify_locked(
+                                    home.path(),
+                                    key.expose_secret().as_bytes(),
+                                    &entries
+                                ),
+                                crate::audit::Integrity::Ok
+                            );
+                            for entry in crate::store::Vault::load_locked(home.path())
+                                .unwrap()
+                                .secrets
+                            {
+                                assert_eq!(
+                                    decrypt_value(&recovered, &entry.cipher).unwrap(),
+                                    "synthetic-value"
+                                );
                             }
                         }
                         // Ordinary audited access completes after pending recovery, then another rotation.
@@ -954,10 +1033,17 @@ mod tests {
         let account = recovery_account(home.path()).unwrap().unwrap();
         let protected = get_credential(&account).unwrap();
         fs::remove_file(&snapshot).unwrap();
-        fs::write(home.path().join("config.json"), r#"{"audit_log":true,"touch_id":false}"#).unwrap();
+        fs::write(
+            home.path().join("config.json"),
+            r#"{"audit_log":true,"touch_id":false}"#,
+        )
+        .unwrap();
         assert!(crate::access::unlock(home.path(), "run", "must-not-log").is_err());
         assert_eq!(get_credential(&account).unwrap(), protected);
-        assert_eq!(fs::read(crate::paths::vault_file(home.path())).unwrap(), before);
+        assert_eq!(
+            fs::read(crate::paths::vault_file(home.path())).unwrap(),
+            before
+        );
         assert!(!home.path().join("audit.log").exists());
         fs::write(snapshot, saved).unwrap();
         let recovered = crate::access::unlock(home.path(), "run", "retried").unwrap();
@@ -975,7 +1061,11 @@ mod tests {
         let new = generate_identity();
         store_identity(&old, home.path()).unwrap();
         seed_vault(home.path(), &old);
-        fs::write(home.path().join("config.json"), r#"{"audit_log":true,"touch_id":false}"#).unwrap();
+        fs::write(
+            home.path().join("config.json"),
+            r#"{"audit_log":true,"touch_id":false}"#,
+        )
+        .unwrap();
         crate::access::unlock(home.path(), "run", &"synthetic-detail-".repeat(4096)).unwrap();
         let before = fs::read(crate::paths::vault_file(home.path())).unwrap();
         let mut vault = crate::store::Vault::load(home.path()).unwrap();
@@ -992,7 +1082,12 @@ mod tests {
             let account = recovery_account(home.path()).unwrap().unwrap();
             let record = get_credential(&account).unwrap();
             assert!(record.as_ref().unwrap().len() < 2048);
-            assert!(fs::metadata(home.path().join("audit.rotation.json")).unwrap().len() > 65536);
+            assert!(
+                fs::metadata(home.path().join("audit.rotation.json"))
+                    .unwrap()
+                    .len()
+                    > 65536
+            );
             assert!(recover_rotation_locked(home.path()).is_err());
             assert_eq!(get_credential(&account).unwrap(), record);
             assert!(home.path().join("audit.rotation.json").exists());
@@ -1000,7 +1095,14 @@ mod tests {
         }
         let recovered = crate::access::unlock(home.path(), "run", "backend-retry").unwrap();
         assert_eq!(recovered.to_public(), new.to_public());
-        assert_eq!(decrypt_value(&recovered, &crate::store::Vault::load(home.path()).unwrap().secrets[0].cipher).unwrap(), "synthetic-value");
+        assert_eq!(
+            decrypt_value(
+                &recovered,
+                &crate::store::Vault::load(home.path()).unwrap().secrets[0].cipher
+            )
+            .unwrap(),
+            "synthetic-value"
+        );
     }
 
     #[test]
@@ -1016,7 +1118,10 @@ mod tests {
             crate::commands::rotate::rotate_in_place(home.path()).unwrap();
             let current = load_identity(home.path()).unwrap();
             assert_ne!(old.to_public(), current.to_public());
-            assert_eq!(fs::read(crate::paths::vault_file(home.path())).unwrap(), before);
+            assert_eq!(
+                fs::read(crate::paths::vault_file(home.path())).unwrap(),
+                before
+            );
             assert!(!home.path().join("audit.log").exists());
             assert!(!home.path().join("audit.key.age").exists());
         }

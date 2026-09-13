@@ -221,6 +221,6 @@ Downstream PR10 must acquire any separate audit transaction lock after
 PR10's pre-append integrity enforcement and separate full audit-transaction
 feature are not included here; the existing append integrity limitations remain.
 
-This candidate is unvalidated: the cloud Rust toolchain was unavailable. File
-sync and directory sync (Unix) are requested, but physical power-loss behavior,
-native credential/biometric runtime and macOS/Windows runtime require validation.
+File sync and directory sync (Unix) are requested, but physical power-loss
+behavior and native credential/biometric runtime require validation. Automated
+recovery tests use temporary vaults and synthetic credential backends.
