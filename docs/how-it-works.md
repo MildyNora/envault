@@ -116,9 +116,10 @@ envault stacks *guidance* (cooperative) and *control* (enforced):
    authorization.
 5. **Biometric gate — optional.** Touch ID / Windows Hello before every
    decryption when enabled. (Linux has no biometric backend; it fails closed.)
-6. **The audit log — optional.** HMAC-SHA256 hash-chain keyed by the identity
-   (unforgeable without the keychain), with a MAC'd head-anchor so truncation or
-   deletion of the tail is *detectable*; size-bounded; fail-closed while enabled.
+6. **The audit log — optional.** HMAC-SHA256 hash-chain keyed by a stable key
+   encrypted to and authenticated by the active identity, then rewrapped during
+   rotation, with a MAC'd head-anchor so truncation or deletion of the tail is
+   *detectable*; size-bounded; fail-closed while enabled.
 7. **Settings integrity.** `audit-log` / `touch-id` / `fill` are **fail-closed**
    on corruption and **keychain-authoritative in release**, so editing
    `config.json` cannot silently disable a protection. Changing a setting is
@@ -191,3 +192,35 @@ plaintext-never-seen guarantee lives in the binary, so it holds on every harness
 - **Release-only paths untested from the dev box** — keychain-authoritative
   settings and the Touch ID prompt are compile-verified only; verify on real
   hardware that they actually gate.
+
+### Audit continuity during identity rotation
+
+Rotation retains the existing authorization-before-lock flow. Under the permanent
+`vault.lock`, it verifies the current identity and audit state and stages both
+vault generations. A protected credential recovery record binds the vault hashes,
+old/new identities and a hash of `audit.rotation.json`. That snapshot file carries
+before/after audit log, head and encrypted/authenticated wrapper bytes, including
+explicit absence; it contains no raw private identity or unwrapped audit key.
+Large logs stay outside the credential record.
+
+Recovery selects the identity for the vault bytes that survived. For identical
+empty-vault bytes, the active credential slot selects the generation. It validates
+the snapshot hash and selected audit state, accepts only recorded before/after
+file states, restores and verifies that audit state, and confirms the stored
+identity before removing the protected recovery record. Failure retains recovery
+data for retry. Do not delete recovery files or credentials to bypass an error.
+Snapshot cleanup after successful recovery is best effort; remaining encrypted
+wrappers do not contain the retired private identities.
+
+Audit access and inspection acquire `vault.lock`, complete recovery, and keep the
+same generation protected through key selection and audit operations. Explicit
+biometric authorization precedes this lock; native credential revalidation may
+still prompt inside it. Locked callers use non-reacquiring identity/storage APIs.
+Downstream PR10 must acquire any separate audit transaction lock after
+`vault.lock`, never in reverse order, and use non-reacquiring audit helpers.
+PR10's pre-append integrity enforcement and separate full audit-transaction
+feature are not included here; the existing append integrity limitations remain.
+
+File sync and directory sync (Unix) are requested, but physical power-loss
+behavior and native credential/biometric runtime require validation. Automated
+recovery tests use temporary vaults and synthetic credential backends.

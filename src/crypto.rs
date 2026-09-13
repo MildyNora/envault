@@ -382,6 +382,8 @@ struct RotationRecovery {
     after: String,
     old_key: String,
     new_key: String,
+    #[serde(default)]
+    audit_snapshot: Option<String>,
 }
 
 fn recovery_account(home: &Path) -> Result<Option<String>> {
@@ -409,6 +411,7 @@ pub(crate) fn prepare_rotation_locked(
         after: vault_digest(after),
         old_key: old.to_string().expose_secret().to_owned(),
         new_key: new.to_string().expose_secret().to_owned(),
+        audit_snapshot: Some(crate::audit::prepare_snapshot_locked(home, old, new)?),
     };
     let raw = serde_json::to_string(&record)?;
     set_credential(&account, &raw)?;
@@ -446,13 +449,26 @@ pub(crate) fn recover_rotation_locked(home: &Path) -> Result<()> {
         anyhow::bail!("vault differs from rotation recovery record; preserve files for recovery");
     };
     let identity = parse_identity(key)?;
+    if let Some(digest) = &record.audit_snapshot {
+        crate::audit::recover_snapshot_locked(home, digest, key == &record.new_key, &identity)?;
+    }
     store_identity_locked(&identity, home)?;
     let saved = get_credential(&stable)?.context("recovered credential missing")?;
     anyhow::ensure!(
         parse_identity(&saved)?.to_public() == identity.to_public(),
         "credential recovery failed"
     );
-    remove_credential(&account)
+    // Retry directory synchronization even when recovered bytes already match.
+    // A previous rename/deletion may have succeeded before its sync failed.
+    crate::audit::sync_rotation_directory(home)?;
+    // Audit restoration and verification must finish before retiring either key.
+    remove_credential(&account)?;
+    // Snapshot bytes contain no private identities. Cleanup is best effort only
+    // after the protected record has been removed; a later prepare replaces it.
+    if record.audit_snapshot.is_some() {
+        let _ = fs::remove_file(home.join("audit.rotation.json"));
+    }
+    Ok(())
 }
 
 pub fn store_recipient(identity: &age::x25519::Identity, home: &Path) -> Result<()> {
@@ -703,6 +719,412 @@ mod tests {
             fs::read(crate::paths::vault_file(home.path())).unwrap(),
             before
         );
+    }
+
+    #[test]
+    fn vault_activation_sync_failure_retries_with_no_audit_writes() {
+        let _env = test_env_lock();
+        let _creds = SyntheticCredentials::new();
+        for empty in [false, true] {
+            let home = tempfile::TempDir::new().unwrap();
+            let old = generate_identity();
+            store_identity(&old, home.path()).unwrap();
+            if empty {
+                crate::store::Vault::default().save(home.path()).unwrap();
+            } else {
+                seed_vault(home.path(), &old);
+            }
+            let _lock = crate::store::lock_generation(home.path()).unwrap();
+            // Stage and snapshot sync succeed; the sync after vault rename fails.
+            let fault = crate::audit::DirectorySyncFailure::after(2);
+            let error = match crate::commands::rotate::rotate_authorized_locked(home.path(), &old) {
+                Err(error) => error,
+                Ok(_) => panic!("activation must report the directory sync failure"),
+            };
+            assert!(error.downcast_ref::<std::io::Error>().is_some());
+            assert_eq!(fault.errors(), 2); // activation, then mandatory recovery sync
+            assert!(!home.path().join("vault.json.new").exists());
+            let account = recovery_account(home.path()).unwrap().unwrap();
+            let protected = get_credential(&account).unwrap().unwrap();
+            let snapshot = fs::read(home.path().join("audit.rotation.json")).unwrap();
+            let record: RotationRecovery = serde_json::from_str(&protected).unwrap();
+            let activated = fs::read(crate::paths::vault_file(home.path())).unwrap();
+            assert_eq!(vault_digest(&activated), record.after);
+            let new = parse_identity(&record.new_key).unwrap();
+            assert_ne!(new.to_public(), old.to_public());
+            let vault: crate::store::Vault = serde_json::from_slice(&activated).unwrap();
+            assert_eq!(vault.secrets.len(), usize::from(!empty));
+            for entry in &vault.secrets {
+                assert_eq!(
+                    decrypt_value(&new, &entry.cipher).unwrap(),
+                    "synthetic-value"
+                );
+            }
+            for name in ["audit.log", "audit.head", "audit.key.age"] {
+                assert!(!home.path().join(name).exists());
+            }
+            assert!(recover_rotation_locked(home.path()).is_err());
+            assert_eq!(fault.errors(), 3);
+            assert_eq!(
+                get_credential(&account).unwrap().as_deref(),
+                Some(protected.as_str())
+            );
+            assert_eq!(
+                fs::read(home.path().join("audit.rotation.json")).unwrap(),
+                snapshot
+            );
+            assert_eq!(
+                fs::read(crate::paths::vault_file(home.path())).unwrap(),
+                activated
+            );
+            drop(fault);
+            recover_rotation_locked(home.path()).unwrap();
+            assert!(get_credential(&account).unwrap().is_none());
+            assert!(!home.path().join("audit.rotation.json").exists());
+            assert_eq!(
+                load_identity_locked(home.path()).unwrap().to_public(),
+                new.to_public()
+            );
+            assert_eq!(
+                fs::read(crate::paths::vault_file(home.path())).unwrap(),
+                activated
+            );
+        }
+    }
+
+    #[test]
+    fn last_audit_change_sync_failure_is_retried_when_bytes_already_match() {
+        let _env = test_env_lock();
+        let _creds = SyntheticCredentials::new();
+        for rollback in [false, true] {
+            let home = tempfile::TempDir::new().unwrap();
+            let old = generate_identity();
+            let new = generate_identity();
+            store_identity(&old, home.path()).unwrap();
+            seed_vault(home.path(), &old);
+            let _lock = crate::store::lock_generation(home.path()).unwrap();
+            crate::audit::record_locked(
+                home.path(),
+                old.to_string().expose_secret().as_bytes(),
+                "run",
+                "synthetic",
+            )
+            .unwrap();
+            let before = fs::read(crate::paths::vault_file(home.path())).unwrap();
+            let mut vault = crate::store::Vault::load_locked(home.path()).unwrap();
+            vault.secrets[0].cipher = encrypt_value(&new.to_public(), "synthetic-value").unwrap();
+            let after = serde_json::to_vec_pretty(&vault).unwrap();
+            prepare_rotation_locked(home.path(), &old, &new, &before, &after).unwrap();
+            let account = recovery_account(home.path()).unwrap().unwrap();
+            let protected = get_credential(&account).unwrap().unwrap();
+            let snapshot = fs::read(home.path().join("audit.rotation.json")).unwrap();
+            let states: serde_json::Value = serde_json::from_slice(&snapshot).unwrap();
+            let target = if rollback { "before" } else { "after" };
+            let selected = if rollback { &old } else { &new };
+            if !rollback {
+                store_identity_locked(&new, home.path()).unwrap();
+                fs::write(crate::paths::vault_file(home.path()), &after).unwrap();
+            }
+            // Earlier audit components already match. Only the final wrapper
+            // replacement (forward) or deletion (rollback) remains to perform.
+            for (index, name) in ["audit.log", "audit.head", "audit.key.age"]
+                .iter()
+                .enumerate()
+            {
+                let state = if index == 2 {
+                    if rollback {
+                        "after"
+                    } else {
+                        "before"
+                    }
+                } else {
+                    target
+                };
+                let bytes: Option<Vec<u8>> =
+                    serde_json::from_value(states[state][index].clone()).unwrap();
+                match bytes {
+                    Some(bytes) => fs::write(home.path().join(name), bytes).unwrap(),
+                    None => assert!(!home.path().join(name).exists()),
+                }
+            }
+            let fault = crate::audit::DirectorySyncFailure::after(0);
+            let error = recover_rotation_locked(home.path()).unwrap_err();
+            assert!(error.downcast_ref::<std::io::Error>().is_some());
+            assert_eq!(fault.errors(), 1);
+            // The real replacement/deletion ran before the injected sync error.
+            for (index, name) in ["audit.log", "audit.head", "audit.key.age"]
+                .iter()
+                .enumerate()
+            {
+                let expected: Option<Vec<u8>> =
+                    serde_json::from_value(states[target][index].clone()).unwrap();
+                match expected {
+                    Some(bytes) => assert_eq!(fs::read(home.path().join(name)).unwrap(), bytes),
+                    None => assert!(!home.path().join(name).exists()),
+                }
+            }
+            assert_eq!(
+                get_credential(&account).unwrap().as_deref(),
+                Some(protected.as_str())
+            );
+            assert_eq!(
+                fs::read(home.path().join("audit.rotation.json")).unwrap(),
+                snapshot
+            );
+            // All bytes now match, but the final directory sync must still run.
+            assert!(recover_rotation_locked(home.path()).is_err());
+            assert_eq!(fault.errors(), 2);
+            assert_eq!(
+                get_credential(&account).unwrap().as_deref(),
+                Some(protected.as_str())
+            );
+            assert_eq!(
+                fs::read(home.path().join("audit.rotation.json")).unwrap(),
+                snapshot
+            );
+            drop(fault);
+            recover_rotation_locked(home.path()).unwrap();
+            assert!(get_credential(&account).unwrap().is_none());
+            assert!(!home.path().join("audit.rotation.json").exists());
+            let identity = load_identity_locked(home.path()).unwrap();
+            assert_eq!(identity.to_public(), selected.to_public());
+            let key = crate::audit::verification_key_locked(home.path(), &identity).unwrap();
+            let entries = crate::audit::read_locked(home.path()).unwrap();
+            assert_eq!(
+                crate::audit::verify_locked(home.path(), key.expose_secret().as_bytes(), &entries),
+                crate::audit::Integrity::Ok
+            );
+            assert_eq!(
+                decrypt_value(
+                    &identity,
+                    &crate::store::Vault::load_locked(home.path())
+                        .unwrap()
+                        .secrets[0]
+                        .cipher
+                )
+                .unwrap(),
+                "synthetic-value"
+            );
+        }
+    }
+
+    #[test]
+    fn audit_and_vault_recover_together_at_each_activation_boundary() {
+        let _env = test_env_lock();
+        let _creds = SyntheticCredentials::new();
+        for previously_rotated in [false, true] {
+            for empty in [false, true] {
+                for activation in 0..3 {
+                    for failure in 0..3 {
+                        let home = tempfile::TempDir::new().unwrap();
+                        let first = generate_identity();
+                        store_identity(&first, home.path()).unwrap();
+                        if empty {
+                            crate::store::Vault::default().save(home.path()).unwrap();
+                        } else {
+                            seed_vault(home.path(), &first);
+                        }
+                        fs::write(
+                            home.path().join("config.json"),
+                            r#"{"audit_log":true,"touch_id":false}"#,
+                        )
+                        .unwrap();
+                        crate::access::unlock(home.path(), "run", "synthetic-before").unwrap();
+                        if previously_rotated {
+                            crate::commands::rotate::rotate_in_place(home.path()).unwrap();
+                        }
+                        let old = load_identity(home.path()).unwrap();
+                        let new = generate_identity();
+                        let before = fs::read(crate::paths::vault_file(home.path())).unwrap();
+                        let mut vault = crate::store::Vault::load(home.path()).unwrap();
+                        for entry in &mut vault.secrets {
+                            entry.cipher =
+                                encrypt_value(&new.to_public(), "synthetic-value").unwrap();
+                        }
+                        let after = serde_json::to_vec_pretty(&vault).unwrap();
+                        let expected_new = if empty {
+                            activation >= 1
+                        } else {
+                            activation == 2
+                        };
+                        let expected = if expected_new { &new } else { &old };
+                        {
+                            let _lock = crate::store::lock_generation(home.path()).unwrap();
+                            prepare_rotation_locked(home.path(), &old, &new, &before, &after)
+                                .unwrap();
+                            let account = recovery_account(home.path()).unwrap().unwrap();
+                            let protected = get_credential(&account).unwrap();
+                            assert!(protected.as_ref().unwrap().len() < 2048);
+                            if activation >= 1 {
+                                store_identity_locked(&new, home.path()).unwrap();
+                            }
+                            if activation == 2 {
+                                fs::write(crate::paths::vault_file(home.path()), &after).unwrap();
+                            } else {
+                                // Model interrupted audit activation while the old vault survives.
+                                let snapshot: serde_json::Value = serde_json::from_slice(
+                                    &fs::read(home.path().join("audit.rotation.json")).unwrap(),
+                                )
+                                .unwrap();
+                                let post_log: Option<Vec<u8>> =
+                                    serde_json::from_value(snapshot["after"][0].clone()).unwrap();
+                                if let Some(log) = post_log {
+                                    fs::write(home.path().join("audit.log"), log).unwrap();
+                                }
+                            }
+                            crate::audit::fail_recovery_after(failure);
+                            assert!(recover_rotation_locked(home.path()).is_err());
+                            assert_eq!(get_credential(&account).unwrap(), protected);
+                            assert!(home.path().join("audit.rotation.json").exists());
+                            recover_rotation_locked(home.path()).unwrap();
+                            assert!(get_credential(&account).unwrap().is_none());
+                            let recovered = load_identity_locked(home.path()).unwrap();
+                            assert_eq!(recovered.to_public(), expected.to_public());
+                            let key =
+                                crate::audit::verification_key_locked(home.path(), &recovered)
+                                    .unwrap();
+                            let entries = crate::audit::read_locked(home.path()).unwrap();
+                            assert_eq!(
+                                crate::audit::verify_locked(
+                                    home.path(),
+                                    key.expose_secret().as_bytes(),
+                                    &entries
+                                ),
+                                crate::audit::Integrity::Ok
+                            );
+                            for entry in crate::store::Vault::load_locked(home.path())
+                                .unwrap()
+                                .secrets
+                            {
+                                assert_eq!(
+                                    decrypt_value(&recovered, &entry.cipher).unwrap(),
+                                    "synthetic-value"
+                                );
+                            }
+                        }
+                        // Ordinary audited access completes after pending recovery, then another rotation.
+                        crate::access::unlock(home.path(), "run", "synthetic-after").unwrap();
+                        crate::commands::rotate::rotate_in_place(home.path()).unwrap();
+                        crate::access::unlock(home.path(), "run", "synthetic-repeat").unwrap();
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn missing_snapshot_preserves_recovery_and_retries_through_audited_access() {
+        let _env = test_env_lock();
+        let _creds = SyntheticCredentials::new();
+        let home = tempfile::TempDir::new().unwrap();
+        let old = generate_identity();
+        store_identity(&old, home.path()).unwrap();
+        seed_vault(home.path(), &old);
+        let before = fs::read(crate::paths::vault_file(home.path())).unwrap();
+        let new = generate_identity();
+        {
+            let _lock = crate::store::lock_generation(home.path()).unwrap();
+            // Absent audit history is an explicit snapshot state, not a missing backup.
+            prepare_rotation_locked(home.path(), &old, &new, &before, b"not-activated").unwrap();
+            store_identity_locked(&new, home.path()).unwrap();
+        }
+        let snapshot = home.path().join("audit.rotation.json");
+        let saved = fs::read(&snapshot).unwrap();
+        let account = recovery_account(home.path()).unwrap().unwrap();
+        let protected = get_credential(&account).unwrap();
+        fs::remove_file(&snapshot).unwrap();
+        fs::write(
+            home.path().join("config.json"),
+            r#"{"audit_log":true,"touch_id":false}"#,
+        )
+        .unwrap();
+        assert!(crate::access::unlock(home.path(), "run", "must-not-log").is_err());
+        assert_eq!(get_credential(&account).unwrap(), protected);
+        assert_eq!(
+            fs::read(crate::paths::vault_file(home.path())).unwrap(),
+            before
+        );
+        assert!(!home.path().join("audit.log").exists());
+        fs::write(snapshot, saved).unwrap();
+        let recovered = crate::access::unlock(home.path(), "run", "retried").unwrap();
+        assert_eq!(recovered.to_public(), old.to_public());
+        assert!(get_credential(&account).unwrap().is_none());
+        assert_eq!(crate::audit::read_locked(home.path()).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn audit_restore_backend_failure_retains_keys_and_large_snapshot_for_retry() {
+        let _env = test_env_lock();
+        let _creds = SyntheticCredentials::new();
+        let home = tempfile::TempDir::new().unwrap();
+        let old = generate_identity();
+        let new = generate_identity();
+        store_identity(&old, home.path()).unwrap();
+        seed_vault(home.path(), &old);
+        fs::write(
+            home.path().join("config.json"),
+            r#"{"audit_log":true,"touch_id":false}"#,
+        )
+        .unwrap();
+        crate::access::unlock(home.path(), "run", &"synthetic-detail-".repeat(4096)).unwrap();
+        let before = fs::read(crate::paths::vault_file(home.path())).unwrap();
+        let mut vault = crate::store::Vault::load(home.path()).unwrap();
+        vault.secrets[0].cipher = encrypt_value(&new.to_public(), "synthetic-value").unwrap();
+        let after = serde_json::to_vec_pretty(&vault).unwrap();
+        let stable = stable_identity_account(&read_vault_id(home.path()).unwrap().unwrap());
+        let stable_file = credential_file(&stable).unwrap();
+        {
+            let _lock = crate::store::lock_generation(home.path()).unwrap();
+            prepare_rotation_locked(home.path(), &old, &new, &before, &after).unwrap();
+            fs::write(crate::paths::vault_file(home.path()), after).unwrap();
+            fs::remove_file(&stable_file).unwrap();
+            fs::create_dir(&stable_file).unwrap(); // benign isolated backend write failure
+            let account = recovery_account(home.path()).unwrap().unwrap();
+            let record = get_credential(&account).unwrap();
+            assert!(record.as_ref().unwrap().len() < 2048);
+            assert!(
+                fs::metadata(home.path().join("audit.rotation.json"))
+                    .unwrap()
+                    .len()
+                    > 65536
+            );
+            assert!(recover_rotation_locked(home.path()).is_err());
+            assert_eq!(get_credential(&account).unwrap(), record);
+            assert!(home.path().join("audit.rotation.json").exists());
+            fs::remove_dir(&stable_file).unwrap();
+        }
+        let recovered = crate::access::unlock(home.path(), "run", "backend-retry").unwrap();
+        assert_eq!(recovered.to_public(), new.to_public());
+        assert_eq!(
+            decrypt_value(
+                &recovered,
+                &crate::store::Vault::load(home.path()).unwrap().secrets[0].cipher
+            )
+            .unwrap(),
+            "synthetic-value"
+        );
+    }
+
+    #[test]
+    fn absent_history_and_identical_empty_vault_rotate_repeatedly() {
+        let _env = test_env_lock();
+        let _creds = SyntheticCredentials::new();
+        let home = tempfile::TempDir::new().unwrap();
+        store_identity(&generate_identity(), home.path()).unwrap();
+        crate::store::Vault::default().save(home.path()).unwrap();
+        let before = fs::read(crate::paths::vault_file(home.path())).unwrap();
+        for _ in 0..3 {
+            let old = load_identity(home.path()).unwrap();
+            crate::commands::rotate::rotate_in_place(home.path()).unwrap();
+            let current = load_identity(home.path()).unwrap();
+            assert_ne!(old.to_public(), current.to_public());
+            assert_eq!(
+                fs::read(crate::paths::vault_file(home.path())).unwrap(),
+                before
+            );
+            assert!(!home.path().join("audit.log").exists());
+            assert!(!home.path().join("audit.key.age").exists());
+        }
     }
 
     #[test]

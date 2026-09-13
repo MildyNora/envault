@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use std::fs;
+use std::io::Write;
 use std::path::Path;
 
 use crate::crypto;
@@ -52,8 +53,13 @@ pub(crate) fn rotate_authorized_locked(
     // keep both keys in protected recovery storage until activation is verified.
     let staged = home.join("vault.json.new");
     let after = serde_json::to_vec_pretty(&vault)?;
-    fs::write(&staged, &after)?;
+    let mut staged_writer = fs::File::create(&staged)?;
     crate::platform::set_mode(&staged, 0o600)?;
+    staged_writer.write_all(&after)?;
+    // Keep the writable handle: Windows FlushFileBuffers requires write access.
+    staged_writer.sync_all()?;
+    drop(staged_writer);
+    crate::audit::sync_rotation_directory(home)?;
 
     // Delete-then-create gives the new Keychain item a fresh ACL, so macOS
     // asks for authorization again: this vault gets a new credential item.
@@ -62,6 +68,7 @@ pub(crate) fn rotate_authorized_locked(
         crypto::delete_identity(home, old_identity)?;
         crypto::store_identity_locked(&new_identity, home)?;
         fs::rename(&staged, paths::vault_file(home)).context("activating the rotated vault")?;
+        crate::audit::sync_rotation_directory(home)?;
         Ok(())
     })();
     // Keep the protected recovery record if backend recovery itself fails.

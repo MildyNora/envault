@@ -14,12 +14,13 @@ pub fn cmd_audit(json: bool) -> Result<()> {
 
     // Loading the identity both proves human presence again and gives the HMAC
     // key needed to verify the chain.
-    let identity = crypto::load_identity(&home)?;
-    let secret = identity.to_string();
+    let _generation = crate::store::lock_generation(&home)?;
+    let identity = crypto::load_identity_locked(&home)?;
+    let secret = audit::verification_key_locked(&home, &identity)?;
     let key = secret.expose_secret().as_bytes();
 
-    let entries = audit::read(&home)?;
-    if entries.is_empty() && matches!(audit::verify(&home, key, &entries), Integrity::Ok) {
+    let entries = audit::read_locked(&home)?;
+    if entries.is_empty() && matches!(audit::verify_locked(&home, key, &entries), Integrity::Ok) {
         println!("audit log is empty (enable it with `envault config set audit-log on`)");
         return Ok(());
     }
@@ -32,7 +33,7 @@ pub fn cmd_audit(json: bool) -> Result<()> {
             println!("{:<26} {:<8} {}", e.ts, e.action, e.detail);
         }
     }
-    match audit::verify(&home, key, &entries) {
+    match audit::verify_locked(&home, key, &entries) {
         Integrity::Ok => println!("\n✔ chain intact and anchored ({} entries)", entries.len()),
         Integrity::Broken(i) => {
             println!("\n✖ TAMPERING: entry {i} was edited or an entry before it was removed")
