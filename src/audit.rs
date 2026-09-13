@@ -10,6 +10,7 @@
 
 use age::secrecy::{ExposeSecret, SecretString};
 use anyhow::{bail, Context, Result};
+use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -20,6 +21,16 @@ type HmacSha256 = Hmac<Sha256>;
 
 /// Keep the log tiny — trim to the most recent entries once it passes this.
 const MAX_BYTES: u64 = 256 * 1024;
+const WRAPPER_VERSION: u8 = 1;
+const WRAPPER_AUTH_DOMAIN: &[u8] = b"envault audit key wrapper auth v1\0";
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AuditKeyWrapper {
+    version: u8,
+    cipher: String,
+    auth: String,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Entry {
@@ -191,13 +202,68 @@ pub fn verify(home: &Path, key: &[u8], entries: &[Entry]) -> Integrity {
     }
 }
 
+fn wrapper_auth_key(identity: &age::x25519::Identity) -> [u8; 32] {
+    let identity = identity.to_string();
+    let mut digest = Sha256::new();
+    digest.update(WRAPPER_AUTH_DOMAIN);
+    digest.update(identity.expose_secret().as_bytes());
+    digest.finalize().into()
+}
+
+fn wrapper_authenticator(
+    identity: &age::x25519::Identity,
+    version: u8,
+    cipher: &str,
+) -> HmacSha256 {
+    let key = wrapper_auth_key(identity);
+    let mut authenticator = HmacSha256::new_from_slice(&key).expect("hmac accepts any key length");
+    authenticator.update(WRAPPER_AUTH_DOMAIN);
+    authenticator.update(&[version]);
+    authenticator.update(cipher.as_bytes());
+    authenticator
+}
+
+fn wrap_key(identity: &age::x25519::Identity, key: &str) -> Result<String> {
+    let cipher = crate::crypto::encrypt_value(&identity.to_public(), key)?;
+    let auth = B64.encode(
+        wrapper_authenticator(identity, WRAPPER_VERSION, &cipher)
+            .finalize()
+            .into_bytes(),
+    );
+    serde_json::to_string(&AuditKeyWrapper {
+        version: WRAPPER_VERSION,
+        cipher,
+        auth,
+    })
+    .context("serializing the authenticated audit verification key")
+}
+
+fn unwrap_key(identity: &age::x25519::Identity, raw: &str) -> Result<String> {
+    let wrapper: AuditKeyWrapper = serde_json::from_str(raw)
+        .context("audit verification key authentication failed: invalid wrapper")?;
+    if wrapper.version != WRAPPER_VERSION {
+        bail!(
+            "unsupported audit verification key wrapper version {}",
+            wrapper.version
+        );
+    }
+    let auth = B64
+        .decode(&wrapper.auth)
+        .context("decoding the audit verification key authentication tag")?;
+    wrapper_authenticator(identity, wrapper.version, &wrapper.cipher)
+        .verify_slice(&auth)
+        .context("audit verification key authentication failed")?;
+    crate::crypto::decrypt_value(identity, &wrapper.cipher)
+        .context("decrypting the authenticated audit verification key")
+}
+
 /// Return the audit-MAC key for the active identity. Legacy vaults use the
 /// identity itself until their first rotation migrates to a stable derived key;
-/// that key is then re-encrypted to each new recipient.
+/// that key is then authenticated and re-encrypted to each new identity.
 pub fn verification_key(home: &Path, identity: &age::x25519::Identity) -> Result<SecretString> {
     let primary = key_file(home);
     match std::fs::read_to_string(&primary) {
-        Ok(cipher) => match crate::crypto::decrypt_value(identity, &cipher) {
+        Ok(wrapper) => match unwrap_key(identity, &wrapper) {
             Ok(key) => Ok(key.into()),
             Err(primary_error) => {
                 // A failed rotation may have stored the new identity just
@@ -205,9 +271,9 @@ pub fn verification_key(home: &Path, identity: &age::x25519::Identity) -> Result
                 // fail-safe and recoverable across that narrow window.
                 let staged = staged_key_file(home);
                 match std::fs::read_to_string(&staged) {
-                    Ok(cipher) => crate::crypto::decrypt_value(identity, &cipher)
+                    Ok(wrapper) => unwrap_key(identity, &wrapper)
                         .map(Into::into)
-                        .context("decrypting the staged audit verification key"),
+                        .context("opening the staged audit verification key"),
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                         Err(primary_error).context("decrypting the audit verification key")
                     }
@@ -220,7 +286,7 @@ pub fn verification_key(home: &Path, identity: &age::x25519::Identity) -> Result
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             let staged = staged_key_file(home);
             match std::fs::read_to_string(&staged) {
-                Ok(cipher) => match crate::crypto::decrypt_value(identity, &cipher) {
+                Ok(wrapper) => match unwrap_key(identity, &wrapper) {
                     Ok(key) => Ok(key.into()),
                     // The identity swap may not have happened yet. With no
                     // active wrapper this remains a legacy identity-keyed log.
@@ -353,11 +419,11 @@ pub fn prepare_key_rotation(
         }
     }
 
-    let cipher = crate::crypto::encrypt_value(&new_identity.to_public(), next_key.expose_secret())?;
+    let wrapper = wrap_key(new_identity, next_key.expose_secret())?;
     files.push(stage_file(
         staged_key_file(home),
         key_file(home),
-        cipher.as_bytes(),
+        wrapper.as_bytes(),
     )?);
 
     Ok(Some(PreparedKeyRotation { files }))
@@ -430,6 +496,35 @@ mod tests {
     }
 
     #[test]
+    fn unauthorized_wrapper_replacement_is_rejected() {
+        let home = TempDir::new().unwrap();
+        let identity = crate::crypto::generate_identity();
+        let attacker_key = "synthetic-attacker-chosen-audit-key";
+        let forged = crate::crypto::encrypt_value(&identity.to_public(), attacker_key).unwrap();
+        std::fs::write(key_file(home.path()), forged).unwrap();
+
+        let error = verification_key(home.path(), &identity)
+            .expect_err("a public-recipient-only replacement must be rejected");
+        assert!(format!("{error:#}").contains("authentication"), "{error:#}");
+    }
+
+    #[test]
+    fn authenticated_wrapper_rejects_cipher_replacement() {
+        let identity = crate::crypto::generate_identity();
+        let mut wrapper: AuditKeyWrapper =
+            serde_json::from_str(&wrap_key(&identity, "legitimate-audit-key").unwrap()).unwrap();
+        wrapper.cipher = crate::crypto::encrypt_value(
+            &identity.to_public(),
+            "synthetic-attacker-chosen-audit-key",
+        )
+        .unwrap();
+
+        let error = unwrap_key(&identity, &serde_json::to_string(&wrapper).unwrap())
+            .expect_err("changing the public-key ciphertext must invalidate its authentication");
+        assert!(error.to_string().contains("authentication"), "{error:#}");
+    }
+
+    #[test]
     fn entries_remain_verifiable_after_key_rotation() {
         let home = TempDir::new().unwrap();
         let old_identity = crate::crypto::generate_identity();
@@ -453,10 +548,16 @@ mod tests {
             old_key.expose_secret(),
             "staging alone must not switch a legacy vault's audit key"
         );
+        let new_key_while_staged = verification_key(home.path(), &new_identity).unwrap();
         prepared.activate().unwrap();
 
         let entries = read(home.path()).unwrap();
         let new_key = verification_key(home.path(), &new_identity).unwrap();
+        assert_eq!(
+            new_key.expose_secret(),
+            new_key_while_staged.expose_secret(),
+            "the staged wrapper must remain recoverable after the identity swap"
+        );
         assert_eq!(
             verify(home.path(), new_key.expose_secret().as_bytes(), &entries),
             Integrity::Ok
@@ -473,7 +574,7 @@ mod tests {
             "rotation must preserve the historical events"
         );
         let wrapped = std::fs::read_to_string(key_file(home.path())).unwrap();
-        let stored_key = crate::crypto::decrypt_value(&new_identity, &wrapped).unwrap();
+        let stored_key = unwrap_key(&new_identity, &wrapped).unwrap();
         assert_ne!(stored_key, *old_key.expose_secret());
 
         let newest_identity = crate::crypto::generate_identity();

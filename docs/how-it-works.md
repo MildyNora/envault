@@ -116,9 +116,10 @@ envault stacks *guidance* (cooperative) and *control* (enforced):
 5. **Biometric gate — optional.** Touch ID / Windows Hello before every
    decryption when enabled. (Linux has no biometric backend; it fails closed.)
 6. **The audit log — optional.** HMAC-SHA256 hash-chain keyed by a stable key
-   encrypted to the active identity and rewrapped during rotation (unforgeable
-   without the keychain), with a MAC'd head-anchor so truncation or deletion of
-   the tail is *detectable*; size-bounded; fail-closed while enabled.
+   encrypted to and authenticated by the active identity, then rewrapped during
+   rotation (unforgeable without the keychain), with a MAC'd head-anchor so
+   truncation or deletion of the tail is *detectable*; size-bounded;
+   fail-closed while enabled.
 7. **Settings integrity.** `audit-log` / `touch-id` / `fill` are **fail-closed**
    on corruption and **keychain-authoritative in release**, so editing
    `config.json` cannot silently disable a protection. Changing a setting is
