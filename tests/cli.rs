@@ -1307,3 +1307,251 @@ fn empty_legacy_explicit_init_rejects_ineligible_state_without_changes() {
         }
     }
 }
+
+fn wait_for_files(paths: &[&std::path::Path]) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !paths.iter().all(|path| path.exists()) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for explicit child-process signal"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
+#[test]
+fn concurrent_adds_both_survive() {
+    let te = TestEnv::new();
+    te.init();
+    let first_ready = te.home.path().join("first-ready");
+    let second_ready = te.home.path().join("second-ready");
+    let first_release = te.home.path().join("first-release");
+    let second_release = te.home.path().join("second-release");
+
+    let spawn_add = |alias: &str, ready: &std::path::Path, release: &std::path::Path| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_envault"))
+            .env("ENVAULT_HOME", te.home.path())
+            .env("ENVAULT_IDENTITY_FILE", te.identity_file())
+            .env("ENVAULT_TEST_TRANSACTION_READY", ready)
+            .env("ENVAULT_TEST_TRANSACTION_RELEASE", release)
+            .current_dir(te.project.path())
+            .args(["add", alias, "--stdin"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap()
+    };
+
+    let mut first = spawn_add("concurrent-first", &first_ready, &first_release);
+    let mut second = spawn_add("concurrent-second", &second_ready, &second_release);
+    std::io::Write::write_all(
+        first.stdin.as_mut().unwrap(),
+        b"SYNTHETIC-CONCURRENT-FIRST-9988\n",
+    )
+    .unwrap();
+    std::io::Write::write_all(
+        second.stdin.as_mut().unwrap(),
+        b"SYNTHETIC-CONCURRENT-SECOND-7766\n",
+    )
+    .unwrap();
+    drop(first.stdin.take());
+    drop(second.stdin.take());
+
+    // Each child signals after it has authenticated and read stdin, then waits
+    // immediately before the transaction. This makes overlap deterministic
+    // without guessing how long process startup takes.
+    wait_for_files(&[&first_ready, &second_ready]);
+    std::fs::write(&first_release, b"release").unwrap();
+    std::fs::write(&second_release, b"release").unwrap();
+
+    let first = first.wait_with_output().unwrap();
+    let second = second.wait_with_output().unwrap();
+    assert!(first.status.success(), "first add failed: {first:?}");
+    assert!(second.status.success(), "second add failed: {second:?}");
+
+    let out = te.envault().args(["ls", "--json"]).assert().success();
+    let listed: serde_json::Value = serde_json::from_slice(&out.get_output().stdout).unwrap();
+    let aliases = listed.as_array().unwrap();
+    assert_eq!(aliases.len(), 2, "both successful additions must remain");
+}
+
+#[test]
+fn queued_add_rejects_identity_rotated_before_transaction() {
+    let te = TestEnv::new();
+    te.init();
+    let ready = te.home.path().join("queued-add-ready");
+    let release = te.home.path().join("queued-add-release");
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_envault"))
+        .env("ENVAULT_HOME", te.home.path())
+        .env("ENVAULT_IDENTITY_FILE", te.identity_file())
+        .env("ENVAULT_TEST_TRANSACTION_READY", &ready)
+        .env("ENVAULT_TEST_TRANSACTION_RELEASE", &release)
+        .current_dir(te.project.path())
+        .args(["add", "queued-key", "--stdin"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::io::Write::write_all(
+        child.stdin.as_mut().unwrap(),
+        b"SYNTHETIC-QUEUED-VALUE-9988\n",
+    )
+    .unwrap();
+    drop(child.stdin.take());
+    wait_for_files(&[&ready]);
+
+    te.envault().arg("rotate").assert().success();
+    std::fs::write(&release, b"release").unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        !output.status.success(),
+        "queued add unexpectedly succeeded"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("identity changed"),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let listed: serde_json::Value = serde_json::from_slice(
+        te.envault()
+            .args(["ls", "--json"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .as_slice(),
+    )
+    .unwrap();
+    assert!(listed.as_array().unwrap().is_empty());
+}
+
+#[test]
+fn queued_import_rejects_identity_rotated_before_transaction() {
+    let te = TestEnv::new();
+    te.init();
+    let dotenv = te.project.path().join("queued.env");
+    std::fs::write(&dotenv, "QUEUED_KEY=SYNTHETIC-QUEUED-IMPORT-7766\n").unwrap();
+    let ready = te.home.path().join("queued-import-ready");
+    let release = te.home.path().join("queued-import-release");
+    let child = std::process::Command::new(env!("CARGO_BIN_EXE_envault"))
+        .env("ENVAULT_HOME", te.home.path())
+        .env("ENVAULT_IDENTITY_FILE", te.identity_file())
+        .env("ENVAULT_TEST_TRANSACTION_READY", &ready)
+        .env("ENVAULT_TEST_TRANSACTION_RELEASE", &release)
+        .current_dir(te.project.path())
+        .args(["import", dotenv.to_str().unwrap()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    wait_for_files(&[&ready]);
+
+    te.envault().arg("rotate").assert().success();
+    std::fs::write(&release, b"release").unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        !output.status.success(),
+        "queued import unexpectedly succeeded"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("identity changed"),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let listed: serde_json::Value = serde_json::from_slice(
+        te.envault()
+            .args(["ls", "--json"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .as_slice(),
+    )
+    .unwrap();
+    assert!(listed.as_array().unwrap().is_empty());
+    assert!(!te.project.path().join("envault.toml").exists());
+}
+
+#[test]
+fn legacy_and_empty_legacy_cli_transactions_terminate_and_preserve_decryptability() {
+    use age::secrecy::ExposeSecret;
+    use base64::Engine;
+    use sha2::{Digest, Sha256};
+    use std::str::FromStr;
+    for empty in [false, true] {
+        for path_scoped in [false, true] {
+            let te = TestEnv::new();
+            let credentials = TempDir::new().unwrap();
+            let old = age::x25519::Identity::generate();
+            let account = if path_scoped {
+                let home = std::fs::canonicalize(te.home.path()).unwrap();
+                format!(
+                    "age-identity-{:x}",
+                    Sha256::digest(home.as_os_str().as_encoded_bytes())
+                )
+            } else {
+                "age-identity".into()
+            };
+            std::fs::write(
+                credentials.path().join(account),
+                old.to_string().expose_secret(),
+            )
+            .unwrap();
+            let cipher = base64::engine::general_purpose::STANDARD
+                .encode(age::encrypt(&old.to_public(), b"synthetic-value").unwrap());
+            let entries = if empty {
+                serde_json::json!([])
+            } else {
+                serde_json::json!([{"alias":"legacy","label":"legacy","cipher":cipher,"created_at":"old","updated_at":"old","notes":""}])
+            };
+            std::fs::write(
+                te.home.path().join("vault.json"),
+                serde_json::to_vec(&serde_json::json!({"secrets":entries})).unwrap(),
+            )
+            .unwrap();
+            let command = || {
+                let mut c = te.envault();
+                c.env("ENVAULT_IDENTITY_DIR", credentials.path())
+                    .timeout(std::time::Duration::from_secs(15));
+                c
+            };
+            if empty {
+                command()
+                    .args(["init", "--empty-legacy"])
+                    .assert()
+                    .success();
+            }
+            command()
+                .args(["add", "first", "--stdin"])
+                .write_stdin("synthetic-value")
+                .assert()
+                .success();
+            command().arg("rotate").assert().success();
+            let id = std::fs::read_to_string(te.home.path().join("identity-id")).unwrap();
+            let identity = age::x25519::Identity::from_str(
+                std::fs::read_to_string(
+                    credentials
+                        .path()
+                        .join(format!("age-identity-v2-{}", id.trim())),
+                )
+                .unwrap()
+                .trim(),
+            )
+            .unwrap();
+            let vault: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(te.home.path().join("vault.json")).unwrap())
+                    .unwrap();
+            for e in vault["secrets"].as_array().unwrap() {
+                let cipher = base64::engine::general_purpose::STANDARD
+                    .decode(e["cipher"].as_str().unwrap())
+                    .unwrap();
+                assert_eq!(
+                    age::decrypt(&identity, &cipher).unwrap(),
+                    b"synthetic-value"
+                );
+            }
+        }
+    }
+}

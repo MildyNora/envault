@@ -165,30 +165,32 @@ fn finish(
 ) -> Result<i32> {
     let (result, code) = match outcome {
         Outcome::Granted(value) => {
-            let recipient = crypto::recipient_from_identity(home)?;
-            let cipher = crypto::encrypt_value(&recipient, &value)?;
-            let mut vault = Vault::load(home)?;
-            if vault.get(&meta.name).is_none() {
-                let now = now_rfc3339();
-                vault.insert(SecretEntry {
-                    label: if meta.label.is_empty() {
-                        meta.name.clone()
-                    } else {
-                        meta.label.clone()
-                    },
-                    alias: meta.name.clone(),
-                    cipher,
-                    url: None,
-                    created_at: now.clone(),
-                    updated_at: now,
-                    notes: if meta.reason.is_empty() {
-                        String::new()
-                    } else {
-                        format!("requested by {}: {}", meta.agent, meta.reason)
-                    },
-                })?;
-                vault.save(home)?;
-            }
+            // Preload the identity, then reject a competing rotation inside the
+            // transaction. Native credential revalidation may itself prompt.
+            let expected_recipient = crypto::recipient_from_identity(home)?;
+            Vault::transaction_for_recipient(home, &expected_recipient, |vault, recipient| {
+                if vault.get(&meta.name).is_none() {
+                    let now = now_rfc3339();
+                    vault.insert(SecretEntry {
+                        label: if meta.label.is_empty() {
+                            meta.name.clone()
+                        } else {
+                            meta.label.clone()
+                        },
+                        alias: meta.name.clone(),
+                        cipher: crypto::encrypt_value(recipient, &value)?,
+                        url: None,
+                        created_at: now.clone(),
+                        updated_at: now,
+                        notes: if meta.reason.is_empty() {
+                            String::new()
+                        } else {
+                            format!("requested by {}: {}", meta.agent, meta.reason)
+                        },
+                    })?;
+                }
+                Ok(())
+            })?;
             println!("✔ added '{}' to the vault.", meta.name);
             (
                 ResultFile {
@@ -593,7 +595,6 @@ mod tests {
             .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .unwrap();
         let code = finish(home.path(), &meta, outcome, Some(session.path())).unwrap();
-        std::env::remove_var("ENVAULT_IDENTITY_FILE");
         assert_eq!(code, 0);
 
         // stored + decrypts to exactly the granted bytes; reason recorded
@@ -616,6 +617,7 @@ mod tests {
         let result: ResultFile = serde_json::from_str(&result).unwrap();
         assert_eq!(result.outcome, "granted");
         assert!(result.note.is_none());
+        std::env::remove_var("ENVAULT_IDENTITY_FILE");
     }
 
     #[cfg(unix)]

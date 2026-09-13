@@ -75,6 +75,11 @@ fn credential_file(account: &str) -> Option<std::path::PathBuf> {
 }
 
 fn get_credential(account: &str) -> Result<Option<String>> {
+    #[cfg(test)]
+    assert!(
+        credential_file(account).is_some(),
+        "unit tests require an isolated credential backend"
+    );
     if let Some(path) = credential_file(account) {
         return match fs::read_to_string(&path) {
             Ok(raw) => Ok(Some(raw)),
@@ -91,6 +96,11 @@ fn get_credential(account: &str) -> Result<Option<String>> {
 }
 
 fn set_credential(account: &str, raw: &str) -> Result<()> {
+    #[cfg(test)]
+    assert!(
+        credential_file(account).is_some(),
+        "unit tests require an isolated credential backend"
+    );
     if let Some(path) = credential_file(account) {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
@@ -106,6 +116,11 @@ fn set_credential(account: &str, raw: &str) -> Result<()> {
 }
 
 fn remove_credential(account: &str) -> Result<()> {
+    #[cfg(test)]
+    assert!(
+        credential_file(account).is_some(),
+        "unit tests require an isolated credential backend"
+    );
     if let Some(path) = credential_file(account) {
         return match fs::remove_file(&path) {
             Ok(()) => Ok(()),
@@ -127,7 +142,7 @@ fn parse_identity(raw: &str) -> Result<age::x25519::Identity> {
 
 fn parse_matching_identity(raw: &str, home: &Path) -> Result<age::x25519::Identity> {
     let identity = parse_identity(raw)?;
-    let vault = crate::store::Vault::load(home)?;
+    let vault = crate::store::Vault::load_locked(home)?;
     anyhow::ensure!(
         !vault.secrets.is_empty(),
         "empty legacy vault: run `envault init --empty-legacy` to create a fresh identity; legacy credentials will be preserved"
@@ -225,7 +240,7 @@ fn initialize_empty_legacy_using(
 ) -> Result<()> {
     let _generation = crate::store::lock_generation(home)?;
     anyhow::ensure!(
-        crate::store::Vault::load(home)?.secrets.is_empty(),
+        crate::store::Vault::load_locked(home)?.secrets.is_empty(),
         "refusing empty-legacy initialization: vault contains secrets"
     );
     // Any identity metadata, including an unreadable/broken link, could name an
@@ -688,6 +703,129 @@ mod tests {
             fs::read(crate::paths::vault_file(home.path())).unwrap(),
             before
         );
+    }
+
+    #[test]
+    fn transactions_recover_rotation_before_insert_metadata_and_delete() {
+        let _env = test_env_lock();
+        let _creds = SyntheticCredentials::new();
+        for activated in [false, true] {
+            for action in ["insert", "metadata", "delete"] {
+                let home = tempfile::TempDir::new().unwrap();
+                let old = generate_identity();
+                let new = generate_identity();
+                store_identity(&old, home.path()).unwrap();
+                seed_vault(home.path(), &old);
+                // Keep a second entry to establish decryptability even after deletion.
+                crate::store::Vault::transaction(home.path(), |v| {
+                    let mut other = v.secrets[0].clone();
+                    other.alias = "keep".into();
+                    v.insert(other)
+                })
+                .unwrap();
+                let before = fs::read(crate::paths::vault_file(home.path())).unwrap();
+                let mut rotated = crate::store::Vault::load(home.path()).unwrap();
+                for e in &mut rotated.secrets {
+                    e.cipher = encrypt_value(&new.to_public(), "synthetic-value").unwrap();
+                }
+                let after = serde_json::to_vec_pretty(&rotated).unwrap();
+                let target = rotated
+                    .secrets
+                    .iter()
+                    .find(|e| e.alias != "keep")
+                    .unwrap()
+                    .alias
+                    .clone();
+                {
+                    let _lock = crate::store::lock_generation(home.path()).unwrap();
+                    prepare_rotation_locked(home.path(), &old, &new, &before, &after).unwrap();
+                    // Deliberately mismatch the active slot and persisted bytes.
+                    store_identity_locked(if activated { &old } else { &new }, home.path())
+                        .unwrap();
+                    fs::write(
+                        crate::paths::vault_file(home.path()),
+                        if activated { &after } else { &before },
+                    )
+                    .unwrap();
+                }
+                let expected = if activated { &new } else { &old };
+                crate::store::Vault::transaction_for_recipient(
+                    home.path(),
+                    &expected.to_public(),
+                    |v, recipient| {
+                        match action {
+                            "insert" => {
+                                let mut e = v.secrets[0].clone();
+                                e.alias = "inserted".into();
+                                e.cipher = encrypt_value(recipient, "synthetic-value")?;
+                                v.insert(e)?;
+                            }
+                            "metadata" => {
+                                v.secrets
+                                    .iter_mut()
+                                    .find(|e| e.alias == target)
+                                    .unwrap()
+                                    .notes = "edited".into()
+                            }
+                            "delete" => v.secrets.retain(|e| e.alias != target),
+                            _ => unreachable!(),
+                        }
+                        Ok(())
+                    },
+                )
+                .unwrap();
+                let id = load_identity(home.path()).unwrap();
+                assert_eq!(id.to_public(), expected.to_public());
+                let saved = crate::store::Vault::load(home.path()).unwrap();
+                for e in &saved.secrets {
+                    assert_eq!(decrypt_value(&id, &e.cipher).unwrap(), "synthetic-value");
+                }
+                match action {
+                    "insert" => assert!(saved.get("inserted").is_some()),
+                    "metadata" => assert_eq!(saved.get(&target).unwrap().notes, "edited"),
+                    "delete" => assert!(saved.get(&target).is_none()),
+                    _ => unreachable!(),
+                }
+                assert!(
+                    get_credential(&recovery_account(home.path()).unwrap().unwrap())
+                        .unwrap()
+                        .is_none()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn transactions_refuse_unknown_recovery_bytes_without_mutation() {
+        let _env = test_env_lock();
+        let _creds = SyntheticCredentials::new();
+        let home = tempfile::TempDir::new().unwrap();
+        let old = generate_identity();
+        store_identity(&old, home.path()).unwrap();
+        seed_vault(home.path(), &old);
+        let before = fs::read(crate::paths::vault_file(home.path())).unwrap();
+        {
+            let _lock = crate::store::lock_generation(home.path()).unwrap();
+            prepare_rotation_locked(home.path(), &old, &generate_identity(), &before, b"after")
+                .unwrap();
+        }
+        let account = recovery_account(home.path()).unwrap().unwrap();
+        let record = get_credential(&account).unwrap();
+        let unknown = b"{\"secrets\":[]}";
+        fs::write(crate::paths::vault_file(home.path()), unknown).unwrap();
+        let result = crate::store::Vault::transaction_for_recipient(
+            home.path(),
+            &old.to_public(),
+            |_v, _r| -> Result<()> {
+                panic!("mutation must not be called before recovery succeeds")
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(
+            fs::read(crate::paths::vault_file(home.path())).unwrap(),
+            unknown
+        );
+        assert_eq!(get_credential(&account).unwrap(), record);
     }
 
     #[test]
