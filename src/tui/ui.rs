@@ -50,13 +50,13 @@ pub fn draw(frame: &mut Frame, app: &App) {
     match &app.mode {
         Mode::Help => draw_help_overlay(frame, area, app),
         Mode::Command(cl) => draw_command_palette(frame, outer[3], &cl.input, cl.sel),
-        Mode::ConfirmDelete => draw_confirm_popup(
+        Mode::ConfirmDelete(expected) => draw_confirm_popup(
             frame,
             area,
             "Delete this secret?",
             &format!(
                 "'{}' will be removed permanently. This cannot be undone.",
-                app.selected_alias().unwrap_or_default()
+                expected.alias
             ),
         ),
         Mode::ConfirmRotate => draw_confirm_popup(

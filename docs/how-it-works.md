@@ -34,7 +34,8 @@ while *structurally* denying it the plaintext.
   (Unix).
 - **Identity** — the age X25519 private key. Stored only in the **OS keychain**
   (macOS Keychain, Windows Credential Manager, Linux Secret Service; service
-  `envault`). Never written to disk in the clear.
+  `envault`, with a separate account per stable vault identifier). Never written
+  to disk in the clear.
 - **Recipient** — the public key, mirrored to `recipient.txt`, but treated as
   advisory only (see §4).
 
@@ -89,8 +90,8 @@ Four commands touch plaintext. Each one confines it:
   value (agent never sees it) or declines with a note. The agent receives only an
   exit code: `0` granted · `3` declined · `4` cancelled · `5` timeout · `6`
   no-window.
-- **`envault rotate`** — re-keys the whole vault to a fresh keypair and revokes
-  every prior keychain "Always Allow" grant. Requires an interactive TTY in
+- **`envault rotate`** — re-keys the current vault to a fresh keypair and replaces
+  its credential item. Other migrated vaults retain their keys and access grants. Requires an interactive TTY in
   release builds, so an agent's non-interactive shell can't trigger a destructive
   re-key. (M3)
 
@@ -117,9 +118,8 @@ envault stacks *guidance* (cooperative) and *control* (enforced):
    decryption when enabled. (Linux has no biometric backend; it fails closed.)
 6. **The audit log — optional.** HMAC-SHA256 hash-chain keyed by a stable key
    encrypted to and authenticated by the active identity, then rewrapped during
-   rotation (unforgeable without the keychain), with a MAC'd head-anchor so
-   truncation or deletion of the tail is *detectable*; size-bounded;
-   fail-closed while enabled.
+   rotation, with a MAC'd head-anchor so truncation or deletion of the tail is
+   *detectable*; size-bounded; fail-closed while enabled.
 7. **Settings integrity.** `audit-log` / `touch-id` / `fill` are **fail-closed**
    on corruption and **keychain-authoritative in release**, so editing
    `config.json` cannot silently disable a protection. Changing a setting is
@@ -183,11 +183,44 @@ plaintext-never-seen guarantee lives in the binary, so it holds on every harness
 
 ## 10. Known gaps / deferred (internal)
 
-- **M2** — rotation is not fully crash-safe: a crash mid-re-key leaves a small
-  window that needs a multi-recipient / two-slot bridge to close. (deferred)
+- **Rotation recovery** — protected before/after key records recover interrupted
+  activation under the generation lock. Native backend failure and power-loss
+  durability remain hardware-untested; see SECURITY.md for the per-vault policy.
 - **Guard path-canonicalization** — the hook's path match is best-effort; the
   real enforcement is the in-binary checks.
 - **L3 / L4** — session-directory randomness; non-Unix file ACLs.
 - **Release-only paths untested from the dev box** — keychain-authoritative
   settings and the Touch ID prompt are compile-verified only; verify on real
   hardware that they actually gate.
+
+### Audit continuity during identity rotation
+
+Rotation retains the existing authorization-before-lock flow. Under the permanent
+`vault.lock`, it verifies the current identity and audit state and stages both
+vault generations. A protected credential recovery record binds the vault hashes,
+old/new identities and a hash of `audit.rotation.json`. That snapshot file carries
+before/after audit log, head and encrypted/authenticated wrapper bytes, including
+explicit absence; it contains no raw private identity or unwrapped audit key.
+Large logs stay outside the credential record.
+
+Recovery selects the identity for the vault bytes that survived. For identical
+empty-vault bytes, the active credential slot selects the generation. It validates
+the snapshot hash and selected audit state, accepts only recorded before/after
+file states, restores and verifies that audit state, and confirms the stored
+identity before removing the protected recovery record. Failure retains recovery
+data for retry. Do not delete recovery files or credentials to bypass an error.
+Snapshot cleanup after successful recovery is best effort; remaining encrypted
+wrappers do not contain the retired private identities.
+
+Audit access and inspection acquire `vault.lock`, complete recovery, and keep the
+same generation protected through key selection and audit operations. Explicit
+biometric authorization precedes this lock; native credential revalidation may
+still prompt inside it. Locked callers use non-reacquiring identity/storage APIs.
+Downstream PR10 must acquire any separate audit transaction lock after
+`vault.lock`, never in reverse order, and use non-reacquiring audit helpers.
+PR10's pre-append integrity enforcement and separate full audit-transaction
+feature are not included here; the existing append integrity limitations remain.
+
+This candidate is unvalidated: the cloud Rust toolchain was unavailable. File
+sync and directory sync (Unix) are requested, but physical power-loss behavior,
+native credential/biometric runtime and macOS/Windows runtime require validation.

@@ -97,9 +97,9 @@ fn hex(bytes: &[u8]) -> String {
 
 /// Append an event, keyed by `key` (the identity's secret bytes). Returns Err
 /// on any I/O failure so the caller can fail closed when auditing is required.
-pub fn record(home: &Path, key: &[u8], action: &str, detail: &str) -> Result<()> {
+pub(crate) fn record_locked(home: &Path, key: &[u8], action: &str, detail: &str) -> Result<()> {
     std::fs::create_dir_all(home)?;
-    let entries = read(home).unwrap_or_default();
+    let entries = read_locked(home).unwrap_or_default();
     let prev = entries.last().map(|e| e.hash.clone()).unwrap_or_default();
     let ts = crate::store::now_rfc3339();
     let hash = entry_mac(key, &ts, action, detail, &prev);
@@ -150,12 +150,12 @@ fn trim(home: &Path, key: &[u8]) -> Result<()> {
     let keep = &lines[lines.len() / 2..];
     std::fs::write(&path, format!("{}\n", keep.join("\n")))?;
     crate::platform::set_mode(&path, 0o600)?;
-    let entries = read(home).unwrap_or_default();
+    let entries = read_locked(home).unwrap_or_default();
     let last = entries.last().map(|e| e.hash.clone()).unwrap_or_default();
     write_head(home, key, entries.len(), &last)
 }
 
-pub fn read(home: &Path) -> Result<Vec<Entry>> {
+pub(crate) fn read_locked(home: &Path) -> Result<Vec<Entry>> {
     let path = log_file(home);
     if !path.exists() {
         return Ok(Vec::new());
@@ -182,7 +182,7 @@ pub enum Integrity {
 }
 
 /// Verify the chain and the head anchor using `key`.
-pub fn verify(home: &Path, key: &[u8], entries: &[Entry]) -> Integrity {
+pub(crate) fn verify_locked(home: &Path, key: &[u8], entries: &[Entry]) -> Integrity {
     for (i, e) in entries.iter().enumerate() {
         if entry_mac(key, &e.ts, &e.action, &e.detail, &e.prev) != e.hash {
             return Integrity::Broken(i);
@@ -260,45 +260,13 @@ fn unwrap_key(identity: &age::x25519::Identity, raw: &str) -> Result<String> {
 /// Return the audit-MAC key for the active identity. Legacy vaults use the
 /// identity itself until their first rotation migrates to a stable derived key;
 /// that key is then authenticated and re-encrypted to each new identity.
-pub fn verification_key(home: &Path, identity: &age::x25519::Identity) -> Result<SecretString> {
-    let primary = key_file(home);
-    match std::fs::read_to_string(&primary) {
-        Ok(wrapper) => match unwrap_key(identity, &wrapper) {
-            Ok(key) => Ok(key.into()),
-            Err(primary_error) => {
-                // A failed rotation may have stored the new identity just
-                // before activating the staged wrapper. Keep audit access
-                // fail-safe and recoverable across that narrow window.
-                let staged = staged_key_file(home);
-                match std::fs::read_to_string(&staged) {
-                    Ok(wrapper) => unwrap_key(identity, &wrapper)
-                        .map(Into::into)
-                        .context("opening the staged audit verification key"),
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                        Err(primary_error).context("decrypting the audit verification key")
-                    }
-                    Err(error) => {
-                        Err(error).with_context(|| format!("reading {}", staged.display()))
-                    }
-                }
-            }
-        },
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let staged = staged_key_file(home);
-            match std::fs::read_to_string(&staged) {
-                Ok(wrapper) => match unwrap_key(identity, &wrapper) {
-                    Ok(key) => Ok(key.into()),
-                    // The identity swap may not have happened yet. With no
-                    // active wrapper this remains a legacy identity-keyed log.
-                    Err(_) => Ok(identity.to_string()),
-                },
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    Ok(identity.to_string())
-                }
-                Err(error) => Err(error).with_context(|| format!("reading {}", staged.display())),
-            }
-        }
-        Err(error) => Err(error).with_context(|| format!("reading {}", primary.display())),
+pub(crate) fn verification_key_locked(home: &Path, identity: &age::x25519::Identity) -> Result<SecretString> {
+    // Pending rotation is recovered by load_identity_locked before this call.
+    // Never select an uncommitted staged wrapper independently of vault recovery.
+    match std::fs::read_to_string(key_file(home)) {
+        Ok(wrapper) => unwrap_key(identity, &wrapper).map(Into::into),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(identity.to_string()),
+        Err(error) => Err(error).context("reading the audit verification key"),
     }
 }
 
@@ -314,6 +282,7 @@ pub struct PreparedKeyRotation {
 }
 
 impl PreparedKeyRotation {
+    #[cfg(test)]
     pub fn activate(self) -> Result<()> {
         for file in self.files {
             std::fs::rename(&file.staged, &file.target)
@@ -361,7 +330,7 @@ fn resign(entries: &mut [Entry], key: &[u8]) {
 /// Verify the existing audit state and wrap its MAC key to the new identity.
 /// Legacy logs migrate once to a one-way derived key so rotation never retains
 /// a decrypt-capable retired private identity.
-pub fn prepare_key_rotation(
+pub(crate) fn prepare_key_rotation_locked(
     home: &Path,
     old_identity: &age::x25519::Identity,
     new_identity: &age::x25519::Identity,
@@ -371,9 +340,9 @@ pub fn prepare_key_rotation(
         return Ok(None);
     }
 
-    let current_key = verification_key(home, old_identity)?;
-    let mut entries = read(home)?;
-    match verify(home, current_key.expose_secret().as_bytes(), &entries) {
+    let current_key = verification_key_locked(home, old_identity)?;
+    let mut entries = read_locked(home)?;
+    match verify_locked(home, current_key.expose_secret().as_bytes(), &entries) {
         Integrity::Ok => {}
         Integrity::Broken(index) => {
             bail!("refusing rotation: audit entry {index} failed verification")
@@ -429,6 +398,180 @@ pub fn prepare_key_rotation(
     Ok(Some(PreparedKeyRotation { files }))
 }
 
+// All production audit calls are made under vault.lock, after protected recovery.
+// Downstream PR10 may add an audit lock only *after* vault.lock, and must use
+// non-reacquiring helpers. This does not add PR10's pre-append verification.
+const AUDIT_FILES: [&str; 3] = ["audit.log", "audit.head", "audit.key.age"];
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RotationSnapshot {
+    version: u8,
+    before: [Option<Vec<u8>>; 3],
+    after: [Option<Vec<u8>>; 3],
+}
+
+fn optional_bytes(path: &Path) -> Result<Option<Vec<u8>>> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).context("reading audit recovery state"),
+    }
+}
+
+fn capture(home: &Path) -> Result<[Option<Vec<u8>>; 3]> {
+    Ok([
+        optional_bytes(&log_file(home))?,
+        optional_bytes(&head_file(home))?,
+        optional_bytes(&key_file(home))?,
+    ])
+}
+
+fn verify_snapshot(state: &[Option<Vec<u8>>; 3], identity: &age::x25519::Identity) -> Result<()> {
+    let key: SecretString = match &state[2] {
+        Some(raw) => unwrap_key(identity, std::str::from_utf8(raw)?)?.into(),
+        None => identity.to_string(),
+    };
+    let raw = state[0].as_deref().unwrap_or_default();
+    let entries: Vec<Entry> = std::str::from_utf8(raw)?
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(serde_json::from_str)
+        .collect::<std::result::Result<_, _>>()?;
+    let key = key.expose_secret().as_bytes();
+    for (index, entry) in entries.iter().enumerate() {
+        anyhow::ensure!(
+            entry_mac(key, &entry.ts, &entry.action, &entry.detail, &entry.prev) == entry.hash
+                && (index == 0 || entry.prev == entries[index - 1].hash),
+            "audit recovery snapshot chain verification failed"
+        );
+    }
+    let last = entries.last().map(|e| e.hash.as_str()).unwrap_or("");
+    match &state[1] {
+        Some(head) => anyhow::ensure!(
+            std::str::from_utf8(head)?.trim() == head_mac(key, entries.len(), last),
+            "audit recovery snapshot anchor verification failed"
+        ),
+        None => anyhow::ensure!(entries.is_empty(), "audit recovery snapshot anchor is missing"),
+    }
+    Ok(())
+}
+
+pub(crate) fn sync_rotation_directory(home: &Path) -> Result<()> {
+    #[cfg(unix)]
+    std::fs::File::open(home)?.sync_all()?;
+    #[cfg(not(unix))]
+    let _ = home; // Directory fsync is not portable; power-loss durability unverified.
+    Ok(())
+}
+
+fn replace_synced(home: &Path, name: &str, bytes: &[u8]) -> Result<()> {
+    let target = home.join(name);
+    let staged = home.join(format!("{name}.restore"));
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&staged)?;
+    crate::platform::set_mode(&staged, 0o600)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    drop(file);
+    std::fs::rename(staged, target)?;
+    sync_rotation_directory(home)
+}
+
+/// Called before any credential replacement, under vault.lock. Only the hash
+/// goes into protected credentials; potentially large logs stay in this file.
+/// No private identity or raw stable key is serialized in this snapshot.
+pub(crate) fn prepare_snapshot_locked(
+    home: &Path,
+    old: &age::x25519::Identity,
+    new: &age::x25519::Identity,
+) -> Result<String> {
+    let before = capture(home)?;
+    verify_snapshot(&before, old)?;
+    let mut after = before.clone();
+    if let Some(prepared) = prepare_key_rotation_locked(home, old, new)? {
+        for file in prepared.files {
+            let index = AUDIT_FILES.iter().position(|name| home.join(name) == file.target)
+                .context("unexpected audit rotation target")?;
+            after[index] = Some(std::fs::read(&file.staged)?);
+            // Staged files are not authoritative and never used by key selection.
+            std::fs::remove_file(file.staged)?;
+        }
+    }
+    verify_snapshot(&after, new)?;
+    let bytes = serde_json::to_vec(&RotationSnapshot { version: 1, before, after })?;
+    let digest = hex(&Sha256::digest(&bytes));
+    replace_synced(home, "audit.rotation.json", &bytes)?;
+    anyhow::ensure!(
+        std::fs::read(home.join("audit.rotation.json"))? == bytes,
+        "audit recovery snapshot was not persisted"
+    );
+    Ok(digest)
+}
+
+/// Recovery accepts recorded pre/post file states, including a partial install.
+/// Unknown bytes fail closed before any mutation and retain the protected keys.
+pub(crate) fn recover_snapshot_locked(
+    home: &Path,
+    digest: &str,
+    activated: bool,
+    identity: &age::x25519::Identity,
+) -> Result<()> {
+    let bytes = std::fs::read(home.join("audit.rotation.json"))?;
+    anyhow::ensure!(hex(&Sha256::digest(&bytes)) == digest, "audit recovery snapshot digest mismatch");
+    let snapshot: RotationSnapshot = serde_json::from_slice(&bytes)?;
+    anyhow::ensure!(snapshot.version == 1, "unsupported audit recovery snapshot");
+    let target = if activated { &snapshot.after } else { &snapshot.before };
+    verify_snapshot(target, identity)?;
+    let current = capture(home)?;
+    for (index, value) in current.iter().enumerate() {
+        anyhow::ensure!(
+            value == &snapshot.before[index] || value == &snapshot.after[index],
+            "audit files differ from protected recovery state; preserve files for recovery"
+        );
+    }
+    for (index, name) in AUDIT_FILES.iter().enumerate() {
+        if current[index] != target[index] {
+            match &target[index] {
+                Some(raw) => replace_synced(home, name, raw)?,
+                None => {
+                    std::fs::remove_file(home.join(name))?;
+                    sync_rotation_directory(home)?;
+                }
+            }
+        }
+        #[cfg(test)]
+        recovery_test_boundary(index)?;
+    }
+    let installed = capture(home)?;
+    anyhow::ensure!(&installed == target, "audit recovery installation mismatch");
+    verify_snapshot(&installed, identity)
+}
+
+#[cfg(test)]
+thread_local! {
+    static RECOVERY_FAILURE: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+fn recovery_test_boundary(index: usize) -> Result<()> {
+    RECOVERY_FAILURE.with(|failure| {
+        if failure.get() == Some(index) {
+            failure.set(None);
+            bail!("injected audit recovery interruption");
+        }
+        Ok(())
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn fail_recovery_after(index: usize) {
+    RECOVERY_FAILURE.with(|failure| failure.set(Some(index)));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -439,58 +582,58 @@ mod tests {
     #[test]
     fn records_and_verifies() {
         let home = TempDir::new().unwrap();
-        record(home.path(), KEY, "run", "npm test").unwrap();
-        record(home.path(), KEY, "reveal", "openrouter").unwrap();
-        let entries = read(home.path()).unwrap();
+        record_locked(home.path(), KEY, "run", "npm test").unwrap();
+        record_locked(home.path(), KEY, "reveal", "openrouter").unwrap();
+        let entries = read_locked(home.path()).unwrap();
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[1].prev, entries[0].hash);
-        assert_eq!(verify(home.path(), KEY, &entries), Integrity::Ok);
+        assert_eq!(verify_locked(home.path(), KEY, &entries), Integrity::Ok);
     }
 
     #[test]
     fn detects_edit() {
         let home = TempDir::new().unwrap();
-        record(home.path(), KEY, "run", "a").unwrap();
-        record(home.path(), KEY, "run", "b").unwrap();
-        let mut entries = read(home.path()).unwrap();
+        record_locked(home.path(), KEY, "run", "a").unwrap();
+        record_locked(home.path(), KEY, "run", "b").unwrap();
+        let mut entries = read_locked(home.path()).unwrap();
         entries[0].detail = "TAMPERED".into();
-        assert_eq!(verify(home.path(), KEY, &entries), Integrity::Broken(0));
+        assert_eq!(verify_locked(home.path(), KEY, &entries), Integrity::Broken(0));
     }
 
     #[test]
     fn detects_interior_deletion() {
         let home = TempDir::new().unwrap();
         for d in ["a", "b", "c"] {
-            record(home.path(), KEY, "run", d).unwrap();
+            record_locked(home.path(), KEY, "run", d).unwrap();
         }
-        let mut entries = read(home.path()).unwrap();
+        let mut entries = read_locked(home.path()).unwrap();
         entries.remove(1);
-        assert_eq!(verify(home.path(), KEY, &entries), Integrity::Broken(1));
+        assert_eq!(verify_locked(home.path(), KEY, &entries), Integrity::Broken(1));
     }
 
     #[test]
     fn detects_tail_truncation_via_head_anchor() {
         let home = TempDir::new().unwrap();
         for d in ["a", "b", "c"] {
-            record(home.path(), KEY, "run", d).unwrap();
+            record_locked(home.path(), KEY, "run", d).unwrap();
         }
         // delete the last line but leave a valid-looking chain
         let raw = std::fs::read_to_string(log_file(home.path())).unwrap();
         let kept: Vec<&str> = raw.lines().take(2).collect();
         std::fs::write(log_file(home.path()), format!("{}\n", kept.join("\n"))).unwrap();
-        let entries = read(home.path()).unwrap();
+        let entries = read_locked(home.path()).unwrap();
         assert_eq!(entries.len(), 2);
-        assert_eq!(verify(home.path(), KEY, &entries), Integrity::HeadMismatch);
+        assert_eq!(verify_locked(home.path(), KEY, &entries), Integrity::HeadMismatch);
     }
 
     #[test]
     fn cannot_forge_without_key() {
         let home = TempDir::new().unwrap();
-        record(home.path(), KEY, "run", "a").unwrap();
-        let entries = read(home.path()).unwrap();
+        record_locked(home.path(), KEY, "run", "a").unwrap();
+        let entries = read_locked(home.path()).unwrap();
         // an attacker who guesses the algorithm but not the key can't verify
         assert_eq!(
-            verify(home.path(), b"wrong-key", &entries),
+            verify_locked(home.path(), b"wrong-key", &entries),
             Integrity::Broken(0)
         );
     }
@@ -503,7 +646,7 @@ mod tests {
         let forged = crate::crypto::encrypt_value(&identity.to_public(), attacker_key).unwrap();
         std::fs::write(key_file(home.path()), forged).unwrap();
 
-        let error = verification_key(home.path(), &identity)
+        let error = verification_key_locked(home.path(), &identity)
             .expect_err("a public-recipient-only replacement must be rejected");
         assert!(format!("{error:#}").contains("authentication"), "{error:#}");
     }
@@ -530,36 +673,30 @@ mod tests {
         let old_identity = crate::crypto::generate_identity();
         let new_identity = crate::crypto::generate_identity();
         let old_key = old_identity.to_string();
-        record(
+        record_locked(
             home.path(),
             old_key.expose_secret().as_bytes(),
             "run",
             "before rotation",
         )
         .unwrap();
-        let original_entries = read(home.path()).unwrap();
+        let original_entries = read_locked(home.path()).unwrap();
 
-        let prepared = prepare_key_rotation(home.path(), &old_identity, &new_identity)
+        let prepared = prepare_key_rotation_locked(home.path(), &old_identity, &new_identity)
             .unwrap()
             .unwrap();
-        let old_key_while_staged = verification_key(home.path(), &old_identity).unwrap();
+        let old_key_while_staged = verification_key_locked(home.path(), &old_identity).unwrap();
         assert_eq!(
             old_key_while_staged.expose_secret(),
             old_key.expose_secret(),
             "staging alone must not switch a legacy vault's audit key"
         );
-        let new_key_while_staged = verification_key(home.path(), &new_identity).unwrap();
         prepared.activate().unwrap();
 
-        let entries = read(home.path()).unwrap();
-        let new_key = verification_key(home.path(), &new_identity).unwrap();
+        let entries = read_locked(home.path()).unwrap();
+        let new_key = verification_key_locked(home.path(), &new_identity).unwrap();
         assert_eq!(
-            new_key.expose_secret(),
-            new_key_while_staged.expose_secret(),
-            "the staged wrapper must remain recoverable after the identity swap"
-        );
-        assert_eq!(
-            verify(home.path(), new_key.expose_secret().as_bytes(), &entries),
+            verify_locked(home.path(), new_key.expose_secret().as_bytes(), &entries),
             Integrity::Ok
         );
         assert_eq!(
@@ -579,14 +716,14 @@ mod tests {
 
         let newest_identity = crate::crypto::generate_identity();
         let migrated_log = std::fs::read(log_file(home.path())).unwrap();
-        prepare_key_rotation(home.path(), &new_identity, &newest_identity)
+        prepare_key_rotation_locked(home.path(), &new_identity, &newest_identity)
             .unwrap()
             .unwrap()
             .activate()
             .unwrap();
-        let newest_key = verification_key(home.path(), &newest_identity).unwrap();
+        let newest_key = verification_key_locked(home.path(), &newest_identity).unwrap();
         assert_eq!(
-            verify(home.path(), newest_key.expose_secret().as_bytes(), &entries),
+            verify_locked(home.path(), newest_key.expose_secret().as_bytes(), &entries),
             Integrity::Ok
         );
         assert_eq!(
@@ -603,7 +740,7 @@ mod tests {
         let new_identity = crate::crypto::generate_identity();
         let old_key = old_identity.to_string();
         for detail in ["first", "second"] {
-            record(
+            record_locked(
                 home.path(),
                 old_key.expose_secret().as_bytes(),
                 "run",
@@ -618,7 +755,7 @@ mod tests {
         )
         .unwrap();
 
-        let error = prepare_key_rotation(home.path(), &old_identity, &new_identity)
+        let error = prepare_key_rotation_locked(home.path(), &old_identity, &new_identity)
             .err()
             .expect("truncated audit must block rotation");
         assert!(error.to_string().contains("head anchor"), "{error:#}");
@@ -631,7 +768,7 @@ mod tests {
         let old_identity = crate::crypto::generate_identity();
         let new_identity = crate::crypto::generate_identity();
         let old_key = old_identity.to_string();
-        record(
+        record_locked(
             home.path(),
             old_key.expose_secret().as_bytes(),
             "run",
@@ -647,7 +784,7 @@ mod tests {
         )
         .unwrap();
 
-        let error = prepare_key_rotation(home.path(), &old_identity, &new_identity)
+        let error = prepare_key_rotation_locked(home.path(), &old_identity, &new_identity)
             .err()
             .expect("malformed audit must block rotation");
         assert!(error.to_string().contains("audit entry 2"), "{error:#}");
