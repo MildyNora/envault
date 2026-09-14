@@ -95,11 +95,15 @@ fn hex(bytes: &[u8]) -> String {
     s
 }
 
-/// Append an event, keyed by `key` (the identity's secret bytes). Returns Err
-/// on any I/O failure so the caller can fail closed when auditing is required.
+/// Append under the caller-held generation lock, using the selected audit key.
+/// Verify existing evidence before opening the log for writing; any failure
+/// refuses access while auditing is required.
 pub(crate) fn record_locked(home: &Path, key: &[u8], action: &str, detail: &str) -> Result<()> {
     std::fs::create_dir_all(home)?;
-    let entries = read_locked(home).unwrap_or_default();
+    let entries = read_locked(home).context("reading the existing audit log")?;
+    if verify_locked(home, key, &entries) != Integrity::Ok {
+        bail!("audit log integrity check failed — refusing to append");
+    }
     let prev = entries.last().map(|e| e.hash.clone()).unwrap_or_default();
     let ts = crate::store::now_rfc3339();
     let hash = entry_mac(key, &ts, action, detail, &prev);
@@ -140,8 +144,9 @@ fn write_head(home: &Path, key: &[u8], count: usize, last: &str) -> Result<()> {
 fn trim(home: &Path, key: &[u8]) -> Result<()> {
     let path = log_file(home);
     let over = std::fs::metadata(&path)
-        .map(|m| m.len() > MAX_BYTES)
-        .unwrap_or(false);
+        .context("reading audit log metadata before trimming")?
+        .len()
+        > MAX_BYTES;
     if !over {
         return Ok(());
     }
@@ -150,17 +155,18 @@ fn trim(home: &Path, key: &[u8]) -> Result<()> {
     let keep = &lines[lines.len() / 2..];
     std::fs::write(&path, format!("{}\n", keep.join("\n")))?;
     crate::platform::set_mode(&path, 0o600)?;
-    let entries = read_locked(home).unwrap_or_default();
+    let entries = read_locked(home).context("reading the trimmed audit log")?;
     let last = entries.last().map(|e| e.hash.clone()).unwrap_or_default();
     write_head(home, key, entries.len(), &last)
 }
 
 pub(crate) fn read_locked(home: &Path) -> Result<Vec<Entry>> {
     let path = log_file(home);
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-    let raw = std::fs::read_to_string(&path)?;
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error).context("reading the audit log"),
+    };
     raw.lines()
         .enumerate()
         .filter(|(_, line)| !line.trim().is_empty())
@@ -197,7 +203,9 @@ pub(crate) fn verify_locked(home: &Path, key: &[u8], entries: &[Entry]) -> Integ
     match std::fs::read_to_string(head_file(home)) {
         Ok(h) if h.trim() == expected => Integrity::Ok,
         // No head yet AND no entries = a genuinely empty log is fine.
-        Err(_) if entries.is_empty() => Integrity::Ok,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && entries.is_empty() => {
+            Integrity::Ok
+        }
         _ => Integrity::HeadMismatch,
     }
 }
@@ -704,6 +712,195 @@ mod tests {
         assert_eq!(
             verify_locked(home.path(), KEY, &entries),
             Integrity::HeadMismatch
+        );
+    }
+
+    #[test]
+    fn refuses_to_append_after_tail_deletion() {
+        let home = TempDir::new().unwrap();
+        let _generation = crate::store::lock_generation(home.path()).unwrap();
+        for d in ["a", "b", "c"] {
+            record_locked(home.path(), KEY, "run", d).unwrap();
+        }
+
+        let raw = std::fs::read_to_string(log_file(home.path())).unwrap();
+        let kept: Vec<&str> = raw.lines().take(2).collect();
+        std::fs::write(log_file(home.path()), format!("{}\n", kept.join("\n"))).unwrap();
+        let truncated_log = std::fs::read(log_file(home.path())).unwrap();
+        let old_head = std::fs::read(head_file(home.path())).unwrap();
+
+        assert!(record_locked(home.path(), KEY, "run", "d").is_err());
+        assert_eq!(std::fs::read(log_file(home.path())).unwrap(), truncated_log);
+        assert_eq!(std::fs::read(head_file(home.path())).unwrap(), old_head);
+    }
+
+    #[test]
+    fn refuses_to_append_after_whole_log_deletion() {
+        let home = TempDir::new().unwrap();
+        let _generation = crate::store::lock_generation(home.path()).unwrap();
+        record_locked(home.path(), KEY, "run", "a").unwrap();
+        record_locked(home.path(), KEY, "run", "b").unwrap();
+        let old_head = std::fs::read(head_file(home.path())).unwrap();
+        std::fs::remove_file(log_file(home.path())).unwrap();
+
+        assert!(record_locked(home.path(), KEY, "run", "c").is_err());
+        assert!(!log_file(home.path()).exists());
+        assert_eq!(std::fs::read(head_file(home.path())).unwrap(), old_head);
+    }
+
+    #[test]
+    fn refuses_to_append_to_malformed_log() {
+        let home = TempDir::new().unwrap();
+        let _generation = crate::store::lock_generation(home.path()).unwrap();
+        record_locked(home.path(), KEY, "run", "a").unwrap();
+        use std::io::Write;
+        let mut log = std::fs::OpenOptions::new()
+            .append(true)
+            .open(log_file(home.path()))
+            .unwrap();
+        log.write_all(b"not-json\n").unwrap();
+        drop(log);
+        let malformed_log = std::fs::read(log_file(home.path())).unwrap();
+        let old_head = std::fs::read(head_file(home.path())).unwrap();
+
+        assert!(record_locked(home.path(), KEY, "run", "b").is_err());
+        assert_eq!(std::fs::read(log_file(home.path())).unwrap(), malformed_log);
+        assert_eq!(std::fs::read(head_file(home.path())).unwrap(), old_head);
+    }
+
+    #[test]
+    fn refuses_to_append_with_the_wrong_key() {
+        let home = TempDir::new().unwrap();
+        let _generation = crate::store::lock_generation(home.path()).unwrap();
+        record_locked(home.path(), KEY, "run", "a").unwrap();
+        let old_log = std::fs::read(log_file(home.path())).unwrap();
+        let old_head = std::fs::read(head_file(home.path())).unwrap();
+
+        assert!(record_locked(home.path(), b"wrong-key", "run", "b").is_err());
+        assert_eq!(std::fs::read(log_file(home.path())).unwrap(), old_log);
+        assert_eq!(std::fs::read(head_file(home.path())).unwrap(), old_head);
+    }
+
+    #[test]
+    fn empty_history_rejects_invalid_and_unreadable_heads_without_append() {
+        for existing_log in [false, true] {
+            for head in [b"invalid-head".as_slice(), b"\xff".as_slice()] {
+                let home = TempDir::new().unwrap();
+                let _generation = crate::store::lock_generation(home.path()).unwrap();
+                if existing_log {
+                    std::fs::write(log_file(home.path()), b"").unwrap();
+                }
+                std::fs::write(head_file(home.path()), head).unwrap();
+                assert_eq!(
+                    verify_locked(home.path(), KEY, &[]),
+                    Integrity::HeadMismatch
+                );
+                assert!(record_locked(home.path(), KEY, "run", "must-not-append").is_err());
+                assert_eq!(std::fs::read(head_file(home.path())).unwrap(), head);
+                if existing_log {
+                    assert!(std::fs::read(log_file(home.path())).unwrap().is_empty());
+                } else {
+                    assert!(!log_file(home.path()).exists());
+                }
+            }
+            let home = TempDir::new().unwrap();
+            let _generation = crate::store::lock_generation(home.path()).unwrap();
+            if existing_log {
+                std::fs::write(log_file(home.path()), b"").unwrap();
+            }
+            // A directory gives a real read error even when tests run as root.
+            std::fs::create_dir(head_file(home.path())).unwrap();
+            let marker = head_file(home.path()).join("preserve");
+            std::fs::write(&marker, b"synthetic-marker").unwrap();
+            assert!(std::fs::read_to_string(head_file(home.path())).is_err());
+            assert_eq!(
+                verify_locked(home.path(), KEY, &[]),
+                Integrity::HeadMismatch
+            );
+            assert!(record_locked(home.path(), KEY, "run", "must-not-append").is_err());
+            assert_eq!(std::fs::read(marker).unwrap(), b"synthetic-marker");
+            assert!(head_file(home.path()).is_dir());
+            if existing_log {
+                assert!(std::fs::read(log_file(home.path())).unwrap().is_empty());
+            } else {
+                assert!(!log_file(home.path()).exists());
+            }
+        }
+    }
+
+    #[test]
+    fn unreadable_log_propagates_io_error_and_preserves_anchor() {
+        let home = TempDir::new().unwrap();
+        let _generation = crate::store::lock_generation(home.path()).unwrap();
+        std::fs::create_dir(log_file(home.path())).unwrap();
+        let marker = log_file(home.path()).join("preserve");
+        std::fs::write(&marker, b"synthetic-marker").unwrap();
+        std::fs::write(head_file(home.path()), b"existing-anchor").unwrap();
+        assert!(read_locked(home.path())
+            .unwrap_err()
+            .downcast_ref::<std::io::Error>()
+            .is_some());
+        assert!(record_locked(home.path(), KEY, "run", "must-not-append")
+            .unwrap_err()
+            .downcast_ref::<std::io::Error>()
+            .is_some());
+        assert_eq!(
+            std::fs::read(head_file(home.path())).unwrap(),
+            b"existing-anchor"
+        );
+        assert_eq!(std::fs::read(marker).unwrap(), b"synthetic-marker");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn log_lookup_error_is_not_treated_as_absent_history() {
+        let home = TempDir::new().unwrap();
+        let _generation = crate::store::lock_generation(home.path()).unwrap();
+        let path = log_file(home.path());
+        // A self-referencing synthetic symlink makes exists() hide ELOOP.
+        std::os::unix::fs::symlink("audit.log", &path).unwrap();
+        let error = std::fs::read_to_string(&path).unwrap_err();
+        assert_ne!(error.kind(), std::io::ErrorKind::NotFound);
+        assert!(!path.exists());
+        assert!(read_locked(home.path()).is_err());
+        assert!(record_locked(home.path(), KEY, "run", "must-not-append").is_err());
+        assert_eq!(
+            std::fs::read_link(path).unwrap(),
+            PathBuf::from("audit.log")
+        );
+        assert!(!head_file(home.path()).exists());
+    }
+
+    #[test]
+    fn trimmed_history_and_next_append_remain_verifiable() {
+        let home = TempDir::new().unwrap();
+        let _generation = crate::store::lock_generation(home.path()).unwrap();
+        let padding = "x".repeat(50_000);
+        for index in 0..8 {
+            record_locked(home.path(), KEY, "run", &format!("event-{index}:{padding}")).unwrap();
+        }
+        let entries = read_locked(home.path()).unwrap();
+        assert!(!entries.is_empty() && entries.len() < 8);
+        assert!(entries.last().unwrap().detail.starts_with("event-7:"));
+        assert_eq!(verify_locked(home.path(), KEY, &entries), Integrity::Ok);
+        record_locked(home.path(), KEY, "run", "after-trim").unwrap();
+        let next = read_locked(home.path()).unwrap();
+        assert_eq!(next.len(), entries.len() + 1);
+        assert_eq!(next.last().unwrap().detail, "after-trim");
+        assert_eq!(verify_locked(home.path(), KEY, &next), Integrity::Ok);
+    }
+
+    #[test]
+    fn trim_read_failure_does_not_write_an_empty_anchor() {
+        let home = TempDir::new().unwrap();
+        let _generation = crate::store::lock_generation(home.path()).unwrap();
+        let malformed = "not-json\n".repeat(MAX_BYTES as usize / 8 + 1);
+        std::fs::write(log_file(home.path()), malformed).unwrap();
+        std::fs::write(head_file(home.path()), b"preserve-anchor").unwrap();
+        assert!(trim(home.path(), KEY).is_err());
+        assert_eq!(
+            std::fs::read(head_file(home.path())).unwrap(),
+            b"preserve-anchor"
         );
     }
 
