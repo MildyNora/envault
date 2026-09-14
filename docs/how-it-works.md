@@ -232,3 +232,20 @@ subsequent appends refuse it. This change does not add audit-append recovery.
 File sync and directory sync (Unix) are requested, but physical power-loss
 behavior and native credential/biometric runtime require validation. Automated
 recovery tests use temporary vaults and synthetic credential backends.
+
+### Piped command input and merged output
+
+With nonterminal stdin, `envault run` inherits the input byte stream directly;
+it does not pass input through terminal echo or newline processing. Interactive
+stdin retains the existing PTY route. Child stdout and stderr share one bounded
+OS pipe before a single masker and output owner. Safe output is flushed promptly;
+a possible secret suffix remains buffered until more raw output arrives or every
+writer closes. Concurrent child writes may interleave in the OS; masking follows
+the resulting merged byte order, not a reconstructed per-stream order.
+
+The wrapper drains output before waiting for the child and retains its ordinary
+exit code. Genuine pipe read/write errors fail the command; the direct child is
+terminated/reaped when possible rather than waiting for it after a pump failure.
+This does not supervise or terminate an arbitrary descendant process tree.
+Native credential, terminal and platform runtime behavior still requires native
+validation; cross-compilation alone cannot establish those properties.
