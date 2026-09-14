@@ -24,14 +24,19 @@ processes started by `envault run`. Keep it that way.
 3. **Run:** anything needing secrets goes through `envault run -- <cmd>`
    (values injected, output masked).
 4. **Missing a secret?** Don't ask for the value — request it:
-   `envault request <name> --reason "why" --agent "Claude Code"`.
+   `envault request <name> --reason "why" --agent "<your-agent-name>"`.
+   Replace `<your-agent-name>` with the coding agent actually making the
+   request (for example, `Claude Code`, `Codex`, or `opencode`). Never claim to be
+   a different agent. If the actual agent name is unknown, omit `--agent`;
+   envault uses `ENVAULT_AGENT` when set, or its unidentified fallback.
    A window opens for the user; you get only the exit code:
    **0** granted (now usable via `envault run`) · **3** declined (reason on
    stderr — respect it) · **4** cancelled · **5** timeout · **6** no window.
 5. **Plaintext `.env` present?** Offer `envault import .env`, then have the
    user delete the file.
-6. **Not installed?** (`command -v envault` fails) Ask the user to install it
-   (`cargo install --path .`) and run `envault init`.
+6. **Not installed?** Ask the human to follow the
+   [installation instructions](https://github.com/MildyNora/envault#install)
+   for their platform and complete setup, including `envault init`, themselves.
 
 ## Browser login (value stays hidden from you)
 Navigate to the form, then `envault fill <name> --selector '<css>'` — the value
@@ -46,6 +51,6 @@ on a host mismatch, tell the user — don't override.
 | Map env var → name | `envault link OPENROUTER_API_KEY openrouter` |
 | Run with secrets | `envault run -- npm start` |
 | One-off mapping | `envault run --env VAR=name -- <cmd>` |
-| Request a missing secret | `envault request <name> --reason "…" --agent "Claude Code"` |
+| Request a missing secret | `envault request <name> --reason "…" --agent "<your-agent-name>"` |
 | Import a .env | `envault import .env` |
 | Browser fill | `envault fill <name> --selector '#password'` |

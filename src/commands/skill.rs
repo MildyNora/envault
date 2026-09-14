@@ -69,6 +69,22 @@ mod tests {
     }
 
     #[test]
+    fn embeds_portable_request_attribution() {
+        assert!(
+            !SKILL_MD.contains("--agent \"Claude Code\""),
+            "the shared skill must not misidentify every caller as Claude Code"
+        );
+        assert!(
+            SKILL_MD.contains("--agent \"<your-agent-name>\""),
+            "request commands must carry an explicit portable identity placeholder"
+        );
+        assert!(
+            SKILL_MD.contains("Never claim to be") && SKILL_MD.contains("a different agent"),
+            "the substitution rule must prevent false provider attribution"
+        );
+    }
+
+    #[test]
     fn installs_into_both_agent_dirs() {
         let home = TempDir::new().unwrap();
         let written = install_skill(home.path()).unwrap();
@@ -79,6 +95,23 @@ mod tests {
         assert!(agents.exists(), "Codex/opencode skill written");
         assert_eq!(std::fs::read_to_string(&claude).unwrap(), SKILL_MD);
         assert_eq!(std::fs::read_to_string(&agents).unwrap(), SKILL_MD);
+    }
+
+    #[test]
+    fn every_installed_target_keeps_request_identity_portable() {
+        let home = TempDir::new().unwrap();
+        let written = install_skill(home.path()).unwrap();
+        for (label, file) in written {
+            let installed = std::fs::read_to_string(file).unwrap();
+            assert!(
+                installed.contains("--agent \"<your-agent-name>\""),
+                "{label} skill must request its real agent name"
+            );
+            assert!(
+                !installed.contains("--agent \"Claude Code\""),
+                "{label} skill must not inherit Claude Code attribution"
+            );
+        }
     }
 
     #[test]
