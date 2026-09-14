@@ -1598,3 +1598,102 @@ fn audit_history_survives_repeated_identity_rotation() {
     assert!(!wrapped_key.contains("AGE-SECRET-KEY"));
     assert!(!te.home.path().join("audit.key.age.new").exists());
 }
+
+#[cfg(unix)]
+#[test]
+fn run_masks_fragments_across_child_output_handles() {
+    let te = TestEnv::new();
+    te.init();
+    te.envault()
+        .args(["add", "pipe-key", "--stdin"])
+        .write_stdin("abcdef\n")
+        .assert()
+        .success();
+    // Shell builtins issue writes in program order. Closing one descriptor
+    // must not flush its partial secret before the other descriptor completes it.
+    for script in [
+        "printf abc; exec 1>&-; printf 'def ordinary abc' >&2",
+        "printf abc >&2; exec 2>&-; printf 'def ordinary abc'",
+    ] {
+        te.envault()
+            .args([
+                "run",
+                "--env",
+                "PIPE_KEY=pipe-key",
+                "--",
+                "sh",
+                "-c",
+                script,
+            ])
+            .write_stdin(b"".as_slice())
+            .timeout(Duration::from_secs(15))
+            .assert()
+            .success()
+            .stdout("[envault:pipe-key] ordinary abc");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn run_drains_large_outputs_and_keeps_exit_status() {
+    let te = TestEnv::new();
+    te.init();
+    te.envault()
+        .args(["add", "pipe-key", "--stdin"])
+        .write_stdin("abcdef\n")
+        .assert()
+        .success();
+    // Both descriptors each exceed typical pipe capacity. The wrapper must
+    // drain while the child runs, with memory bounded independently of volume.
+    let script = "i=0; while [ $i -lt 20000 ]; do printf 'out:abcdef\n'; printf 'err:abcdef\n' >&2; i=$((i+1)); done; exit 7";
+    let result = te
+        .envault()
+        .args([
+            "run",
+            "--env",
+            "PIPE_KEY=pipe-key",
+            "--",
+            "sh",
+            "-c",
+            script,
+        ])
+        .write_stdin(b"".as_slice())
+        .timeout(Duration::from_secs(30))
+        .assert()
+        .code(7);
+    let output = String::from_utf8(result.get_output().stdout.clone()).unwrap();
+    assert_eq!(output.matches("out:[envault:pipe-key]\n").count(), 20000);
+    assert_eq!(output.matches("err:[envault:pipe-key]\n").count(), 20000);
+    assert!(!output.contains("abcdef"));
+    assert!(result.get_output().stderr.is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn run_preserves_piped_stdin_bytes() {
+    let te = TestEnv::new();
+    te.init();
+
+    for input in [
+        b"".as_slice(),
+        b"no-final-newline".as_slice(),
+        b"line-one\nline-two\r\n\0\x01\x7f".as_slice(),
+        b"with-final-newline\n".as_slice(),
+    ] {
+        let expected = input.iter().map(|b| format!("{b:02x}")).collect::<String>();
+        te.envault()
+            .args([
+                "run",
+                "--allow-missing",
+                "--",
+                "sh",
+                "-c",
+                "od -An -v -tx1 | tr -d ' \\n'",
+            ])
+            .write_stdin(input)
+            .timeout(Duration::from_secs(15))
+            .assert()
+            .success()
+            .stdout(expected);
+    }
+}
