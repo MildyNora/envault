@@ -119,7 +119,9 @@ envault stacks *guidance* (cooperative) and *control* (enforced):
 6. **The audit log — optional.** HMAC-SHA256 hash-chain keyed by a stable key
    encrypted to and authenticated by the active identity, then rewrapped during
    rotation, with a MAC'd head-anchor so truncation or deletion of the tail is
-   *detectable*; size-bounded; fail-closed while enabled.
+   *detectable*. Before append, the existing log must parse and its chain/head
+   must verify; refusal preserves the existing evidence. The log is size-bounded
+   and fail-closed while enabled.
 7. **Settings integrity.** `audit-log` / `touch-id` / `fill` are **fail-closed**
    on corruption and **keychain-authoritative in release**, so editing
    `config.json` cannot silently disable a protection. Changing a setting is
@@ -216,10 +218,16 @@ Audit access and inspection acquire `vault.lock`, complete recovery, and keep th
 same generation protected through key selection and audit operations. Explicit
 biometric authorization precedes this lock; native credential revalidation may
 still prompt inside it. Locked callers use non-reacquiring identity/storage APIs.
-Downstream PR10 must acquire any separate audit transaction lock after
-`vault.lock`, never in reverse order, and use non-reacquiring audit helpers.
-PR10's pre-append integrity enforcement and separate full audit-transaction
-feature are not included here; the existing append integrity limitations remain.
+The same generation lock covers the complete read/verify/append/head-update/trim
+operation and audit inspection; no second audit lock is needed. Before opening
+the log for append, read errors or failed chain/head verification refuse access
+without changing log/head evidence. Only a missing head with empty history is
+accepted as initial history; invalid or unreadable heads are refused. Trimming
+propagates read errors instead of replacing the anchor with an empty history.
+
+Serialization does not make the separate log/head writes crash-atomic. An I/O
+failure or interruption after writing begins can leave mismatched evidence;
+subsequent appends refuse it. This change does not add audit-append recovery.
 
 File sync and directory sync (Unix) are requested, but physical power-loss
 behavior and native credential/biometric runtime require validation. Automated
