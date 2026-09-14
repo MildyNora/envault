@@ -1,7 +1,9 @@
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, Paragraph, Wrap};
+use ratatui::widgets::{
+    Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap,
+};
 use ratatui::Frame;
 
 use super::app::{App, Mode, StatusKind, COMMANDS, FIELD_NAMES};
@@ -208,6 +210,7 @@ fn draw_list(frame: &mut Frame, area: Rect, app: &App) {
         Span::styled("add new secret", add_style),
     ])));
 
+    let selected = app.selected.min(items.len().saturating_sub(1));
     let border = if searching { KEYCAP } else { ACCENT };
     let list = List::new(items).block(
         Block::default()
@@ -216,7 +219,9 @@ fn draw_list(frame: &mut Frame, area: Rect, app: &App) {
             .border_style(Style::default().fg(border))
             .title(title),
     );
-    frame.render_widget(list, area);
+    let mut state = ListState::default();
+    state.select(Some(selected));
+    frame.render_stateful_widget(list, area, &mut state);
 }
 
 fn draw_details(frame: &mut Frame, area: Rect, app: &App) {
@@ -704,6 +709,37 @@ mod tests {
         buffer_text(&terminal)
     }
 
+    fn render_list_sized(app: &App, w: u16, h: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                draw_list(frame, area, app);
+            })
+            .unwrap();
+        buffer_text(&terminal)
+    }
+
+    fn many_secrets(count: usize) -> App {
+        let id = generate_identity();
+        let mut vault = Vault::default();
+        for index in 0..count {
+            let alias = format!("secret-{index:02}");
+            vault
+                .insert(SecretEntry {
+                    alias: alias.clone(),
+                    label: format!("label {index}"),
+                    cipher: "SYNTHETIC-CIPHER-NOT-PLAINTEXT".into(),
+                    url: None,
+                    created_at: "2026-08-26T00:00:00Z".into(),
+                    updated_at: "2026-08-26T00:00:00Z".into(),
+                    notes: String::new(),
+                })
+                .unwrap();
+        }
+        App::new(vault, id.to_public())
+    }
+
     #[test]
     fn list_numbers_names_and_hides_value() {
         let app = test_app();
@@ -833,6 +869,71 @@ mod tests {
             add_row > secret_row,
             "add row sits below the secrets: {text}"
         );
+    }
+
+    #[test]
+    fn selected_row_scrolls_beyond_initial_viewport() {
+        let mut app = many_secrets(12);
+        app.selected = 10;
+        let text = render_list_sized(&app, 32, 6);
+        assert!(
+            text.contains("11 secret-10"),
+            "selected row must be visible: {text}"
+        );
+    }
+
+    #[test]
+    fn add_row_scrolls_into_view() {
+        let mut app = many_secrets(12);
+        app.selected = app.add_row_index();
+        let text = render_list_sized(&app, 32, 6);
+        assert!(
+            text.contains("add new secret"),
+            "selected add row must be visible: {text}"
+        );
+    }
+
+    #[test]
+    fn scrolling_back_to_first_row_restores_the_top() {
+        let mut app = many_secrets(12);
+        app.selected = app.add_row_index();
+        assert!(render_list_sized(&app, 32, 6).contains("add new secret"));
+
+        app.selected = 0;
+        let text = render_list_sized(&app, 32, 6);
+        assert!(
+            text.contains("1 secret-00"),
+            "first row must be visible: {text}"
+        );
+    }
+
+    #[test]
+    fn filtered_selection_scrolls_with_coherent_numbering() {
+        let mut app = many_secrets(12);
+        app.query = "secret-1".into();
+        app.selected = 1;
+        let text = render_list_sized(&app, 32, 4);
+        assert!(
+            text.contains("2 secret-11"),
+            "filtered selection and numbering must remain visible: {text}"
+        );
+    }
+
+    #[test]
+    fn selected_row_remains_visible_after_resize_without_rendering_ciphertext() {
+        let mut app = many_secrets(12);
+        app.selected = 10;
+        for height in [5, 9] {
+            let text = render_list_sized(&app, 32, height);
+            assert!(
+                text.contains("11 secret-10"),
+                "selected row must survive height {height}: {text}"
+            );
+            assert!(
+                !text.contains("SYNTHETIC-CIPHER-NOT-PLAINTEXT"),
+                "list must not render ciphertext: {text}"
+            );
+        }
     }
 
     #[test]
