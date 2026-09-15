@@ -373,8 +373,11 @@ mod tests {
         let file = std::fs::File::create(&path).unwrap();
         file.set_len(MAX_LOCAL_BYTES + 1).unwrap();
         assert!(read_local(&path).is_err());
-        // ENOTDIR is a lookup error, not a missing child file.
-        assert!(read_local(&path.join("child")).is_err());
+        #[cfg(unix)]
+        {
+            // ENOTDIR is a lookup error, not a missing child file.
+            assert!(read_local(&path.join("child")).is_err());
+        }
         let text = serde_json::to_string(&diagnose(home.path())).unwrap();
         assert!(!text.contains(&home.path().display().to_string()));
         assert!(!text.contains("os error"));
