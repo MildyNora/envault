@@ -42,7 +42,10 @@ pub fn cmd_init(if_needed: bool, empty_legacy: bool) -> Result<()> {
 
     println!("Initialized envault at {}", home.display());
     println!("  public key : {}", identity.to_public());
-    println!("  private key: stored in the macOS Keychain (service 'envault')");
+    println!(
+        "  private key: stored in {} (service 'envault')",
+        crate::platform::credential_store_label()
+    );
     println!("\nNext: add a secret with `envault add <alias>`");
     Ok(())
 }

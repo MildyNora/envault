@@ -1016,6 +1016,7 @@ dependencies = [
  "dotenvy",
  "hmac",
  "keyring",
+ "libc",
  "portable-pty",
  "predicates",
  "ratatui",

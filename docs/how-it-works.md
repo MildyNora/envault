@@ -249,3 +249,26 @@ terminated/reaped when possible rather than waiting for it after a pump failure.
 This does not supervise or terminate an arbitrary descendant process tree.
 Native credential, terminal and platform runtime behavior still requires native
 validation; cross-compilation alone cannot establish those properties.
+
+### Local setup observations
+
+`envault doctor` and `envault doctor --json` inspect only local regular files,
+with a 4 MiB read limit per file. Exit 0 and `local_checks_passed: true` mean
+local checks passed, including possible advisories; they do not establish vault
+usability. The diagnostic does not open credentials, authenticate, acquire a
+generation lock, migrate, recover, repair mirrors, or remove recovery artifacts.
+Credential availability, identity/vault matching, protected settings, audit
+authenticity, encrypted-payload validity and protected recovery remain unchecked.
+
+Missing local files do not establish that reinitialization is safe. Missing
+identity metadata may indicate a legacy vault. A missing or malformed public
+recipient mirror is advisory; it does not establish whether the authoritative
+identity can use the vault. Settings mirror checks describe structure only.
+Base64 decoding verifies encoding, not age ciphertext or decryptability.
+
+Observations are uncoordinated and may span concurrent changes; they are not an
+authenticated generation snapshot. Special files and links are refused, errors
+are sanitized, and no contents, aliases or actual paths appear in reports. No
+explicit filesystem content, permission or timestamp writes are made; ordinary
+reads may update OS-managed access timestamps. Human setup/recovery assessment
+and native runtime validation remain necessary.

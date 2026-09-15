@@ -1,6 +1,7 @@
 pub mod add;
 pub mod audit;
 pub mod config;
+pub mod doctor;
 pub mod fill;
 pub mod guard;
 pub mod import;
