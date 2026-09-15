@@ -1791,11 +1791,25 @@ fn run_preserves_piped_stdin_bytes() {
 #[test]
 fn doctor_observes_missing_vault_and_mirrors_without_reinitialization_advice() {
     let te = TestEnv::new();
-    std::fs::write(te.home.path().join("identity-id"), "synthetic-stable-marker").unwrap();
-    std::fs::write(te.home.path().join("vault.json.new"), "pending-bytes-preserve").unwrap();
+    std::fs::write(
+        te.home.path().join("identity-id"),
+        "synthetic-stable-marker",
+    )
+    .unwrap();
+    std::fs::write(
+        te.home.path().join("vault.json.new"),
+        "pending-bytes-preserve",
+    )
+    .unwrap();
     let before = doctor_metadata_snapshot(te.home.path());
-    let output = te.envault().args(["doctor", "--json"]).assert().success()
-        .get_output().stdout.clone();
+    let output = te
+        .envault()
+        .args(["doctor", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
     let report: serde_json::Value = serde_json::from_slice(&output).unwrap();
     assert_eq!(report["local_checks_passed"], true);
     let text = String::from_utf8(output).unwrap();
@@ -1810,13 +1824,19 @@ fn doctor_observes_missing_vault_and_mirrors_without_reinitialization_advice() {
 #[test]
 fn doctor_sanitizes_local_parse_errors_in_text_and_json() {
     let te = TestEnv::new();
-    std::fs::write(te.home.path().join("vault.json"), "SENSITIVE-SYNTHETIC-BAD-JSON").unwrap();
+    std::fs::write(
+        te.home.path().join("vault.json"),
+        "SENSITIVE-SYNTHETIC-BAD-JSON",
+    )
+    .unwrap();
     std::fs::write(te.home.path().join("config.json"), b"\xff").unwrap();
     let before = doctor_metadata_snapshot(te.home.path());
     for json in [false, true] {
         let mut cmd = te.envault();
         cmd.arg("doctor");
-        if json { cmd.arg("--json"); }
+        if json {
+            cmd.arg("--json");
+        }
         let output = cmd.assert().code(2).get_output().clone();
         let text = String::from_utf8(output.stdout).unwrap();
         assert!(!text.contains("SENSITIVE-SYNTHETIC-BAD-JSON"));
@@ -1828,14 +1848,24 @@ fn doctor_sanitizes_local_parse_errors_in_text_and_json() {
         if json {
             let report: serde_json::Value = serde_json::from_str(&text).unwrap();
             assert_eq!(report["local_checks_passed"], false);
-        } else { assert!(text.contains("local checks failed")); }
+        } else {
+            assert!(text.contains("local checks failed"));
+        }
     }
     assert_eq!(doctor_metadata_snapshot(te.home.path()), before);
 }
 
 // Include names, kinds, read-only flags, modification times and contents, including
 // directories and recovery-like artifacts. Access times are OS-managed by reads.
-type DoctorFileObservation = (PathBuf, bool, bool, u64, bool, Option<std::time::SystemTime>, Vec<u8>);
+type DoctorFileObservation = (
+    PathBuf,
+    bool,
+    bool,
+    u64,
+    bool,
+    Option<std::time::SystemTime>,
+    Vec<u8>,
+);
 
 fn doctor_metadata_snapshot(root: &std::path::Path) -> Vec<DoctorFileObservation> {
     let mut found = Vec::new();
@@ -1844,9 +1874,18 @@ fn doctor_metadata_snapshot(root: &std::path::Path) -> Vec<DoctorFileObservation
         let meta = std::fs::symlink_metadata(&path).unwrap();
         let bytes = if meta.is_file() && !meta.file_type().is_symlink() {
             std::fs::read(&path).unwrap()
-        } else { Vec::new() };
-        found.push((path.strip_prefix(root).unwrap().to_path_buf(), meta.is_dir(),
-            meta.file_type().is_symlink(), meta.len(), meta.permissions().readonly(), meta.modified().ok(), bytes));
+        } else {
+            Vec::new()
+        };
+        found.push((
+            path.strip_prefix(root).unwrap().to_path_buf(),
+            meta.is_dir(),
+            meta.file_type().is_symlink(),
+            meta.len(),
+            meta.permissions().readonly(),
+            meta.modified().ok(),
+            bytes,
+        ));
     }
     found.sort_by(|a, b| a.0.cmp(&b.0));
     found

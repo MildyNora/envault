@@ -14,10 +14,19 @@ const MAX_LOCAL_BYTES: u64 = 4 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
-enum Status { Ok, Advisory, Error, NotChecked }
+enum Status {
+    Ok,
+    Advisory,
+    Error,
+    NotChecked,
+}
 
 #[derive(Debug, Serialize)]
-struct Check { name: &'static str, status: Status, detail: String }
+struct Check {
+    name: &'static str,
+    status: Status,
+    detail: String,
+}
 
 #[derive(Debug, Serialize)]
 struct Report {
@@ -35,25 +44,41 @@ pub fn cmd_doctor(json: bool) -> anyhow::Result<i32> {
         println!("envault doctor — local observations only");
         println!("credential store: {} (not opened)", report.credential_store);
         for check in &report.checks {
-            println!("[{}] {}: {}", status_name(check.status), check.name, check.detail);
+            println!(
+                "[{}] {}: {}",
+                status_name(check.status),
+                check.name,
+                check.detail
+            );
         }
         println!("{}", report.observation_scope);
-        println!("overall: {}", if report.local_checks_passed {
-            "local checks passed; vault usability not established"
-        } else { "local checks failed; vault usability not established" });
+        println!(
+            "overall: {}",
+            if report.local_checks_passed {
+                "local checks passed; vault usability not established"
+            } else {
+                "local checks failed; vault usability not established"
+            }
+        );
     }
     Ok(if report.local_checks_passed { 0 } else { 2 })
 }
 
 fn status_name(status: Status) -> &'static str {
     match status {
-        Status::Ok => "ok", Status::Advisory => "advisory",
-        Status::Error => "error", Status::NotChecked => "not-checked",
+        Status::Ok => "ok",
+        Status::Advisory => "advisory",
+        Status::Error => "error",
+        Status::NotChecked => "not-checked",
     }
 }
 
 fn check(name: &'static str, status: Status, detail: impl Into<String>) -> Check {
-    Check { name, status, detail: detail.into() }
+    Check {
+        name,
+        status,
+        detail: detail.into(),
+    }
 }
 
 // A diagnostic must not call runtime load/recovery/settings APIs. Even a
@@ -67,18 +92,31 @@ fn diagnose(home: &Path) -> Report {
         }
         Err(_) => checks.push(check("local home", Status::Error, "metadata unavailable")),
         Ok(meta) if unsafe_link(&meta) || !meta.is_dir() => {
-            checks.push(check("local home", Status::Error, "not a regular directory; inspection refused"));
+            checks.push(check(
+                "local home",
+                Status::Error,
+                "not a regular directory; inspection refused",
+            ));
         }
         Ok(_) => {
             checks.push(check_vault(&home.join("vault.json")));
             checks.push(check_recipient(&home.join("recipient.txt")));
             checks.push(check_settings(&home.join("config.json")));
-            checks.push(observe_file(&home.join("identity-id"), "identity metadata",
-                "absent; legacy association is possible; protected association not checked"));
-            for (file, label) in [("audit.log", "audit log"), ("audit.head", "audit head"),
-                ("audit.key.age", "audit key wrapper")] {
-                checks.push(observe_file(&home.join(file), label,
-                    "absent locally; audit authenticity and protected recovery not checked"));
+            checks.push(observe_file(
+                &home.join("identity-id"),
+                "identity metadata",
+                "absent; legacy association is possible; protected association not checked",
+            ));
+            for (file, label) in [
+                ("audit.log", "audit log"),
+                ("audit.head", "audit head"),
+                ("audit.key.age", "audit key wrapper"),
+            ] {
+                checks.push(observe_file(
+                    &home.join(file),
+                    label,
+                    "absent locally; audit authenticity and protected recovery not checked",
+                ));
             }
             match (regular_metadata(&home.join("audit.log")), regular_metadata(&home.join("audit.head"))) {
                 (Ok(Some(_)), Ok(None)) | (Ok(None), Ok(Some(_))) => checks.push(check(
@@ -89,13 +127,33 @@ fn diagnose(home: &Path) -> Report {
         }
     }
     for (name, detail) in [
-        ("credential availability", "protected credential store intentionally not opened"),
-        ("key/vault matching", "authoritative identity and decryptability not checked"),
-        ("protected settings", "authority and effective values not checked"),
-        ("audit authenticity", "chain, anchor and wrapper authenticity not checked"),
-        ("protected recovery status", "recovery records not opened; no recovery or cleanup attempted"),
-        ("encrypted-payload validity", "Base64 encoding checks do not establish age format or decryptability"),
-    ] { checks.push(check(name, Status::NotChecked, detail)); }
+        (
+            "credential availability",
+            "protected credential store intentionally not opened",
+        ),
+        (
+            "key/vault matching",
+            "authoritative identity and decryptability not checked",
+        ),
+        (
+            "protected settings",
+            "authority and effective values not checked",
+        ),
+        (
+            "audit authenticity",
+            "chain, anchor and wrapper authenticity not checked",
+        ),
+        (
+            "protected recovery status",
+            "recovery records not opened; no recovery or cleanup attempted",
+        ),
+        (
+            "encrypted-payload validity",
+            "Base64 encoding checks do not establish age format or decryptability",
+        ),
+    ] {
+        checks.push(check(name, Status::NotChecked, detail));
+    }
     Report {
         local_checks_passed: checks.iter().all(|c| c.status != Status::Error),
         credential_store: crate::platform::credential_store_label(),
@@ -112,12 +170,16 @@ fn unsafe_link(meta: &std::fs::Metadata) -> bool {
         meta.file_attributes() & 0x400 != 0
     }
     #[cfg(not(windows))]
-    { meta.file_type().is_symlink() }
+    {
+        meta.file_type().is_symlink()
+    }
 }
 
 fn regular_metadata(path: &Path) -> Result<Option<std::fs::Metadata>, &'static str> {
     match std::fs::symlink_metadata(path) {
-        Ok(meta) if unsafe_link(&meta) || !meta.is_file() => Err("non-regular file or link; inspection refused"),
+        Ok(meta) if unsafe_link(&meta) || !meta.is_file() => {
+            Err("non-regular file or link; inspection refused")
+        }
         Ok(meta) if meta.len() > MAX_LOCAL_BYTES => Err("exceeds local inspection size limit"),
         Ok(meta) => Ok(Some(meta)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -128,13 +190,19 @@ fn regular_metadata(path: &Path) -> Result<Option<std::fs::Metadata>, &'static s
 fn observe_file(path: &Path, name: &'static str, absent: &'static str) -> Check {
     match regular_metadata(path) {
         Ok(None) => check(name, Status::Advisory, absent),
-        Ok(Some(_)) => check(name, Status::Advisory, "regular file observed; content and authority not checked"),
+        Ok(Some(_)) => check(
+            name,
+            Status::Advisory,
+            "regular file observed; content and authority not checked",
+        ),
         Err(detail) => check(name, Status::Error, detail),
     }
 }
 
 fn read_local(path: &Path) -> Result<Option<Vec<u8>>, &'static str> {
-    if regular_metadata(path)?.is_none() { return Ok(None); }
+    if regular_metadata(path)?.is_none() {
+        return Ok(None);
+    }
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -150,15 +218,28 @@ fn read_local(path: &Path) -> Result<Option<Vec<u8>>, &'static str> {
         options.custom_flags(0x00200000);
     }
     #[cfg(not(any(unix, windows)))]
-    { return Err("bounded file inspection unsupported on this platform"); }
-    let file = options.open(path).map_err(|_| "file unreadable or changed during inspection")?;
-    let meta = file.metadata().map_err(|_| "opened file metadata unavailable")?;
-    if unsafe_link(&meta) || !meta.is_file() { return Err("opened object is not a regular file"); }
-    if meta.len() > MAX_LOCAL_BYTES { return Err("exceeds local inspection size limit"); }
+    {
+        return Err("bounded file inspection unsupported on this platform");
+    }
+    let file = options
+        .open(path)
+        .map_err(|_| "file unreadable or changed during inspection")?;
+    let meta = file
+        .metadata()
+        .map_err(|_| "opened file metadata unavailable")?;
+    if unsafe_link(&meta) || !meta.is_file() {
+        return Err("opened object is not a regular file");
+    }
+    if meta.len() > MAX_LOCAL_BYTES {
+        return Err("exceeds local inspection size limit");
+    }
     let mut raw = Vec::new();
-    file.take(MAX_LOCAL_BYTES + 1).read_to_end(&mut raw)
+    file.take(MAX_LOCAL_BYTES + 1)
+        .read_to_end(&mut raw)
         .map_err(|_| "file read failed")?;
-    if raw.len() as u64 > MAX_LOCAL_BYTES { return Err("exceeds local inspection size limit"); }
+    if raw.len() as u64 > MAX_LOCAL_BYTES {
+        return Err("exceeds local inspection size limit");
+    }
     Ok(Some(raw))
 }
 
@@ -171,13 +252,25 @@ fn check_vault(path: &Path) -> Check {
     };
     let vault: Vault = match serde_json::from_slice(&raw) {
         Ok(vault) => vault,
-        Err(_) => return check("vault", Status::Error, "invalid local JSON/schema; preserve files for human assessment"),
+        Err(_) => {
+            return check(
+                "vault",
+                Status::Error,
+                "invalid local JSON/schema; preserve files for human assessment",
+            )
+        }
     };
     let mut aliases = HashSet::new();
-    let invalid_aliases = vault.secrets.iter()
-        .filter(|entry| !is_valid_alias(&entry.alias) || !aliases.insert(&entry.alias)).count();
-    let invalid_encodings = vault.secrets.iter()
-        .filter(|entry| B64.decode(entry.cipher.trim()).is_err()).count();
+    let invalid_aliases = vault
+        .secrets
+        .iter()
+        .filter(|entry| !is_valid_alias(&entry.alias) || !aliases.insert(&entry.alias))
+        .count();
+    let invalid_encodings = vault
+        .secrets
+        .iter()
+        .filter(|entry| B64.decode(entry.cipher.trim()).is_err())
+        .count();
     check("vault", if invalid_aliases + invalid_encodings == 0 { Status::Ok } else { Status::Error },
         format!("{} local records; {invalid_aliases} invalid/duplicate aliases; {invalid_encodings} invalid Base64 encodings; age format and decryptability not checked", vault.secrets.len()))
 }
@@ -185,7 +278,10 @@ fn check_vault(path: &Path) -> Check {
 fn check_recipient(path: &Path) -> Check {
     let detail = match read_local(path) {
         Ok(None) => "public mirror absent; authoritative identity not checked",
-        Ok(Some(raw)) => match std::str::from_utf8(&raw).ok().and_then(|s| x25519::Recipient::from_str(s.trim()).ok()) {
+        Ok(Some(raw)) => match std::str::from_utf8(&raw)
+            .ok()
+            .and_then(|s| x25519::Recipient::from_str(s.trim()).ok())
+        {
             Some(_) => "public mirror parses; freshness and key/vault match not checked",
             None => "public mirror malformed; this does not establish vault unusability",
         },
@@ -196,10 +292,22 @@ fn check_recipient(path: &Path) -> Check {
 
 fn check_settings(path: &Path) -> Check {
     match read_local(path) {
-        Ok(None) => check("settings mirror", Status::Advisory, "absent; effective protected settings not checked"),
+        Ok(None) => check(
+            "settings mirror",
+            Status::Advisory,
+            "absent; effective protected settings not checked",
+        ),
         Ok(Some(raw)) => match serde_json::from_slice::<Settings>(&raw) {
-            Ok(_) => check("settings mirror", Status::Ok, "local structure parses; protected authority and effective values not checked"),
-            Err(_) => check("settings mirror", Status::Error, "invalid local JSON/schema; protected authority and effective values not checked"),
+            Ok(_) => check(
+                "settings mirror",
+                Status::Ok,
+                "local structure parses; protected authority and effective values not checked",
+            ),
+            Err(_) => check(
+                "settings mirror",
+                Status::Error,
+                "invalid local JSON/schema; protected authority and effective values not checked",
+            ),
         },
         Err(detail) => check("settings mirror", Status::Error, detail),
     }
@@ -279,7 +387,10 @@ mod tests {
         std::fs::write(&path, "synthetic-history-preserve").unwrap();
         let report = diagnose(home.path());
         assert!(!report.local_checks_passed);
-        assert!(report.checks.iter().any(|c| c.name == "audit evidence pair"));
+        assert!(report
+            .checks
+            .iter()
+            .any(|c| c.name == "audit evidence pair"));
         assert_eq!(std::fs::read(&path).unwrap(), b"synthetic-history-preserve");
         assert!(!home.path().join("audit.head").exists());
     }
