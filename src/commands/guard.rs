@@ -180,6 +180,7 @@ mod tests {
             "envault link OPENROUTER_API_KEY openrouter",
             "envault import .env",
             "envault request openrouter --reason \"need it\"",
+            "envault doctor --json",
             "ls -la",
         ] {
             let input = json!({"command": cmd});

@@ -307,6 +307,96 @@ fn init_refuses_to_replace_an_identity_when_the_vault_is_missing() {
 }
 
 #[test]
+fn init_names_the_current_platform_credential_store() {
+    let te = TestEnv::new();
+    let output = te
+        .envault()
+        .arg("init")
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let expected = if cfg!(target_os = "macos") {
+        "macOS Keychain"
+    } else if cfg!(target_os = "windows") {
+        "Windows Credential Manager"
+    } else if cfg!(target_os = "linux") {
+        "Secret Service"
+    } else {
+        "OS credential store"
+    };
+    assert!(stdout.contains(expected), "got: {stdout}");
+    if !cfg!(target_os = "macos") {
+        assert!(!stdout.contains("macOS Keychain"), "got: {stdout}");
+    }
+}
+
+#[test]
+fn doctor_reports_local_absence_without_creating_files() {
+    let te = TestEnv::new();
+    assert!(std::fs::read_dir(te.home.path()).unwrap().next().is_none());
+
+    te.envault()
+        .arg("doctor")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("local checks passed"))
+        .stdout(predicates::str::contains("safe reinitialization"));
+
+    assert!(std::fs::read_dir(te.home.path()).unwrap().next().is_none());
+}
+
+#[test]
+fn doctor_is_read_only_and_never_renders_secret_material() {
+    let te = TestEnv::new();
+    te.init();
+    let plaintext = "synthetic-doctor-secret-97531";
+    te.envault()
+        .args(["add", "doctor-key", "--stdin"])
+        .write_stdin(format!("{plaintext}\n"))
+        .assert()
+        .success();
+
+    let identity_dir = te.home.path().join("identity-must-not-be-opened");
+    std::fs::create_dir(&identity_dir).unwrap();
+    let snapshot = snapshot_files(te.home.path());
+
+    let mut command = te.envault();
+    command.env("ENVAULT_IDENTITY_FILE", &identity_dir);
+    let output = command
+        .args(["doctor", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(!stdout.contains(plaintext), "got: {stdout}");
+    assert!(!stdout.contains("AGE-SECRET-KEY"), "got: {stdout}");
+    assert!(!stdout.contains("cipher"), "got: {stdout}");
+    assert!(stdout.contains("not-checked"), "got: {stdout}");
+    let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(report["local_checks_passed"], true);
+    assert!(report.get("healthy").is_none());
+    assert_eq!(snapshot_files(te.home.path()), snapshot);
+}
+
+fn snapshot_files(root: &std::path::Path) -> Vec<(PathBuf, Vec<u8>)> {
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(root).unwrap() {
+        let entry = entry.unwrap();
+        if entry.file_type().unwrap().is_file() {
+            files.push((
+                entry.path().strip_prefix(root).unwrap().to_path_buf(),
+                std::fs::read(entry.path()).unwrap(),
+            ));
+        }
+    }
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+    files
+}
+
+#[test]
 fn add_then_ls_shows_alias_but_never_value() {
     let te = TestEnv::new();
     te.init();
@@ -1696,4 +1786,68 @@ fn run_preserves_piped_stdin_bytes() {
             .success()
             .stdout(expected);
     }
+}
+
+#[test]
+fn doctor_observes_missing_vault_and_mirrors_without_reinitialization_advice() {
+    let te = TestEnv::new();
+    std::fs::write(te.home.path().join("identity-id"), "synthetic-stable-marker").unwrap();
+    std::fs::write(te.home.path().join("vault.json.new"), "pending-bytes-preserve").unwrap();
+    let before = doctor_metadata_snapshot(te.home.path());
+    let output = te.envault().args(["doctor", "--json"]).assert().success()
+        .get_output().stdout.clone();
+    let report: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(report["local_checks_passed"], true);
+    let text = String::from_utf8(output).unwrap();
+    assert!(text.contains("protected identity/recovery may still exist"));
+    assert!(text.contains("protected recovery status"));
+    assert!(!text.contains("envault init"));
+    assert!(!text.contains("synthetic-stable-marker"));
+    assert!(!text.contains("pending-bytes-preserve"));
+    assert_eq!(doctor_metadata_snapshot(te.home.path()), before);
+}
+
+#[test]
+fn doctor_sanitizes_local_parse_errors_in_text_and_json() {
+    let te = TestEnv::new();
+    std::fs::write(te.home.path().join("vault.json"), "SENSITIVE-SYNTHETIC-BAD-JSON").unwrap();
+    std::fs::write(te.home.path().join("config.json"), b"\xff").unwrap();
+    let before = doctor_metadata_snapshot(te.home.path());
+    for json in [false, true] {
+        let mut cmd = te.envault();
+        cmd.arg("doctor");
+        if json { cmd.arg("--json"); }
+        let output = cmd.assert().code(2).get_output().clone();
+        let text = String::from_utf8(output.stdout).unwrap();
+        assert!(!text.contains("SENSITIVE-SYNTHETIC-BAD-JSON"));
+        assert!(!text.contains(&te.home.path().display().to_string()));
+        assert!(!text.contains("healthy"));
+        assert!(!text.contains("defaults apply"));
+        assert!(!text.contains("remain fail-closed"));
+        assert!(output.stderr.is_empty());
+        if json {
+            let report: serde_json::Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(report["local_checks_passed"], false);
+        } else { assert!(text.contains("local checks failed")); }
+    }
+    assert_eq!(doctor_metadata_snapshot(te.home.path()), before);
+}
+
+// Include names, kinds, read-only flags, modification times and contents, including
+// directories and recovery-like artifacts. Access times are OS-managed by reads.
+type DoctorFileObservation = (PathBuf, bool, bool, u64, bool, Option<std::time::SystemTime>, Vec<u8>);
+
+fn doctor_metadata_snapshot(root: &std::path::Path) -> Vec<DoctorFileObservation> {
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir(root).unwrap() {
+        let path = entry.unwrap().path();
+        let meta = std::fs::symlink_metadata(&path).unwrap();
+        let bytes = if meta.is_file() && !meta.file_type().is_symlink() {
+            std::fs::read(&path).unwrap()
+        } else { Vec::new() };
+        found.push((path.strip_prefix(root).unwrap().to_path_buf(), meta.is_dir(),
+            meta.file_type().is_symlink(), meta.len(), meta.permissions().readonly(), meta.modified().ok(), bytes));
+    }
+    found.sort_by(|a, b| a.0.cmp(&b.0));
+    found
 }

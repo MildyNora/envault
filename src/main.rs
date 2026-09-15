@@ -78,6 +78,12 @@ enum Cmd {
         #[command(subcommand)]
         action: Option<ConfigAction>,
     },
+    /// Observe bounded local setup files without unlocking; does not establish vault usability
+    Doctor {
+        /// Emit a machine-readable report
+        #[arg(long)]
+        json: bool,
+    },
     /// Map a project env var to a vault alias in envault.toml
     Link { env_var: String, alias: String },
     /// Type a secret into the browser page over CDP (value never shown)
@@ -153,6 +159,10 @@ fn main() {
         Some(Cmd::Config { action }) => match action {
             None => commands::config::cmd_config_show(),
             Some(ConfigAction::Set { key, value }) => commands::config::cmd_config_set(key, value),
+        },
+        Some(Cmd::Doctor { json }) => match commands::doctor::cmd_doctor(json) {
+            Ok(code) => std::process::exit(code),
+            Err(e) => Err(e),
         },
         Some(Cmd::Link { env_var, alias }) => commands::link::cmd_link(env_var, alias),
         Some(Cmd::Fill {
